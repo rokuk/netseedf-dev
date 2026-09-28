@@ -1,0 +1,119 @@
+import numpy as np
+import pytest
+import xarray as xr
+
+from netseedf.core.coords import GridLocator, find_geo, geo_grid, normalize_lon
+
+
+@pytest.fixture
+def ds(samples):
+    handles = []
+
+    def _open(name):
+        d = xr.open_dataset(samples[name])
+        handles.append(d)
+        return d
+
+    yield _open
+    for d in handles:
+        d.close()
+
+
+def test_regular_grid(ds):
+    d = ds("regular_global.nc")
+    geo = find_geo(d["sst"], d)
+    assert geo.kind == "regular"
+    assert geo.dims == ("lat", "lon")
+
+
+def test_curvilinear_grid(ds):
+    d = ds("curvilinear.nc")
+    geo = find_geo(d["temp"], d)
+    assert geo.kind == "curvilinear"
+    assert geo.dims == ("y", "x")
+    assert (geo.lat.name, geo.lon.name) == ("lat", "lon")
+
+
+def test_wrf_coordinates_follow_time_index(ds):
+    d = ds("wrf_like.nc")
+    geo = find_geo(d["T2"], d)
+    assert geo.kind == "curvilinear"
+    assert geo.dims == ("south_north", "west_east")
+    grid = geo_grid(d["T2"], geo, {"Time": 1})
+    assert grid.lat.shape == grid.values.shape == (20, 30)
+    np.testing.assert_allclose(grid.values, d["T2"].isel(Time=1).values)
+
+
+def test_points(ds):
+    d = ds("points.nc")
+    geo = find_geo(d["precip"], d)
+    assert geo.kind == "points"
+    assert geo.dims == ("station",)
+
+
+def test_no_geo_for_timeseries(ds):
+    d = ds("timeseries.nc")
+    assert find_geo(d["discharge"], d) is None
+
+
+def test_regular_grid_is_sorted_and_lon_normalized(ds):
+    d = ds("regular_global.nc")
+    grid = geo_grid(d["sst"], find_geo(d["sst"], d), {"time": 2})
+    assert np.all(np.diff(grid.lat) > 0) and np.all(np.diff(grid.lon) > 0)
+    assert grid.lon[0] == -180 and grid.lon[-1] == 178
+    assert grid.is_global
+    i, j = np.searchsorted(grid.lat, 89), np.searchsorted(grid.lon, 0)
+    assert grid.values[i, j] == pytest.approx(float(d["sst"].sel(time=d.time[2], lat=89, lon=0)))
+
+
+def test_dateline_box_stays_contiguous(ds):
+    d = ds("pacific.nc")
+    grid = geo_grid(d["sla"], find_geo(d["sla"], d), {})
+    assert (grid.lon.min(), grid.lon.max()) == (150, 210)
+
+
+def test_normalize_lon():
+    lon, lon_0_360 = normalize_lon(np.array([0.0, 90, 180, 270]))
+    np.testing.assert_array_equal(lon, [0, 90, -180, -90])
+    assert not lon_0_360
+    lon, lon_0_360 = normalize_lon(np.array([-170.0, 170]))
+    np.testing.assert_array_equal(lon, [190, 170])
+    assert lon_0_360
+    np.testing.assert_array_equal(normalize_lon(np.array([-170.0, 170]), False)[0], [-170, 170])
+
+
+def test_downsampled_grid(ds):
+    d = ds("regular_global.nc")
+    grid = geo_grid(d["sst"], find_geo(d["sst"], d), {}, max_size=45)
+    assert grid.values.shape == (45, 45)
+    assert grid.slice.steps == (2, 4)
+
+
+def test_regular_locator(ds):
+    d = ds("regular_global.nc")
+    grid = geo_grid(d["sst"], find_geo(d["sst"], d), {})
+    loc = GridLocator(grid)
+    i, j = loc.nearest(45.4, 10.9)
+    assert (grid.lat[i], grid.lon[j]) == (45, 10)
+    i, j = loc.nearest(0, 179.5)  # wraps around to -180
+    assert grid.lon[j] == -180
+    assert loc.nearest(89.9, 0) is not None  # half a cell beyond the last centre
+
+
+def test_regular_locator_outside_grid(ds):
+    d = ds("four_d.nc")
+    loc = GridLocator(geo_grid(d["salinity"], find_geo(d["salinity"], d), {}))
+    assert loc.nearest(50, 0) is not None
+    assert loc.nearest(10, 0) is None
+    assert loc.nearest(50, 100) is None
+
+
+def test_curvilinear_locator(ds):
+    d = ds("curvilinear.nc")
+    grid = geo_grid(d["temp"], find_geo(d["temp"], d), {})
+    loc = GridLocator(grid)
+    idx = loc.nearest(grid.lat[10, 20], grid.lon[10, 20])
+    assert idx == (10, 20)
+    assert loc.nearest(-30, 100) is None
+    (_, value) = loc.value_at(grid.lat[5, 5], grid.lon[5, 5])
+    assert value == grid.values[5, 5]

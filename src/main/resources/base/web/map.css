@@ -1,0 +1,40 @@
+html, body, #map {
+  height: 100%;
+  margin: 0;
+  background: #dfe3e8;
+}
+
+/* Keep grid cells crisp instead of blurring them when zoomed in. */
+.data-overlay {
+  image-rendering: pixelated;
+}
+
+.info, .legend {
+  background: rgba(255, 255, 255, 0.9);
+  padding: 4px 8px;
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  font: 12px/1.4 system-ui, sans-serif;
+  color: #222;
+}
+
+.info:empty {
+  display: none;
+}
+
+.legend .title {
+  font-weight: 600;
+  margin-bottom: 2px;
+  max-width: 260px;
+}
+
+.legend .bar {
+  width: 240px;
+  height: 12px;
+  border: 1px solid #888;
+}
+
+.legend .labels {
+  display: flex;
+  justify-content: space-between;
+}

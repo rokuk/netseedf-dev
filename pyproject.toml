@@ -1,0 +1,43 @@
+[project]
+name = "netseedf-dev"
+version = "0.1.0"
+description = "Quick and simple viewer for NetCDF files: variables, tables, plots and maps."
+requires-python = ">=3.13"
+license = "GPL-3.0-or-later"
+# fbs Pro (build tool, provides fbs_runtime) is licensed separately: install it
+# into the venv from the link in your purchase email. Don't add it here, the
+# download URL contains your license key.
+dependencies = [
+    "cartopy>=0.26.0",
+    "matplotlib>=3.11.2",
+    "netcdf4>=1.7.4",
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
+    "pyside6>=6.11.2",
+    "xarray>=2026.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-qt>=4.5.0",
+    "ruff>=0.16.9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src/main/python", "."]
+testpaths = ["tests"]
+qt_api = "pyside6"
+filterwarnings = [
+    # Raised inside netCDF4 when the sample files are written
+    "ignore:Setting the shape on a NumPy array:DeprecationWarning",
+    # matplotlib's Qt backend checks a Qt attribute that Qt 6 deprecated
+    "ignore:Enum value 'Qt..ApplicationAttribute.AA_UseHighDpiPixmaps':DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 110
+src = ["src/main/python", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
