@@ -1,8 +1,14 @@
 """Rendering map data as images and colours for the Leaflet web map.
 
-Leaflet stretches an image overlay linearly between its bounds in Web
-Mercator, so the image rows are laid out in Mercator y, not in latitude.
-Otherwise the overlay would drift away from the basemap towards the poles.
+Regular grids become one pixel per cell, with the edges of every row and
+column: the page stretches each between its edges, so cells line up with
+the basemap and the grid lines at any zoom.
+
+Curvilinear grids with few enough cells (at full resolution) become one
+quadrilateral per cell, with the same corners as the grid lines. Others
+become an image stretched linearly between its bounds in Web Mercator, so
+their image rows are laid out in Mercator y, not in latitude. Otherwise the
+overlay would drift away from the basemap towards the poles.
 """
 
 import base64
@@ -16,9 +22,23 @@ from matplotlib.colors import Normalize, to_hex
 from matplotlib.figure import Figure
 from PIL import Image
 
-from netseedf.core.coords import MERCATOR_MAX_LAT, GeoGrid
+from netseedf.core.coords import MERCATOR_MAX_LAT, GeoGrid, cell_edges
+from netseedf.core.gridlines import cell_corners, unwrap_lon
 
 PIXELS_PER_CELL = 3
+MAX_POLYGON_CELLS = 20_000  # more and drawing every cell as a polygon gets slow
+# Resampled cell edges land on the nearest image pixel, so they're off by up to half a pixel.
+# Zoomed in, a few pixels per cell makes that visible (and it shifts whenever the
+# detail is reloaded), so small images are scaled up to about screen resolution.
+MIN_PX = 2048
+
+
+def _image_size(width, height, max_px):
+    """(width, height) scaled up by a whole number (keeps whole pixels per cell) to MIN_PX."""
+    width, height = max(int(width), 1), max(int(height), 1)
+    longest = max(width, height)
+    scale = max(1, min(-(-MIN_PX // longest), max_px // longest))
+    return min(width * scale, max_px), min(height * scale, max_px)
 
 
 def mercator_y(lat):
@@ -37,6 +57,9 @@ class Overlay:
     west: float
     north: float
     east: float
+    # Regular grids: edges of the image rows (north to south) and columns (west to east).
+    rows: list[float] | None = None
+    cols: list[float] | None = None
 
     @property
     def data_url(self):
@@ -60,45 +83,58 @@ def render_overlay(grid: GeoGrid, cmap, vmin, vmax, max_px=4096) -> Overlay | No
     raise ValueError(f"Can't render a {grid.kind} grid as an image")
 
 
-def cell_edges(centres):
-    """Edges between 1D cell centres, extending half a cell at both ends."""
-    c = np.asarray(centres, dtype=float)
-    if c.size == 1:
-        return np.array([c[0] - 0.5, c[0] + 0.5])
-    mid = (c[:-1] + c[1:]) / 2
-    return np.concatenate([[c[0] - (mid[0] - c[0])], mid, [c[-1] + (c[-1] - mid[-1])]])
-
-
 def _render_regular(grid, cmap, vmin, vmax, max_px):
-    lat_edges = np.clip(cell_edges(grid.lat), -90, 90)
-    lon_edges = cell_edges(grid.lon)
-    south, north = max(lat_edges[0], -MERCATOR_MAX_LAT), min(lat_edges[-1], MERCATOR_MAX_LAT)
-    if south >= north:
+    lat_edges = grid.lat_edges if grid.lat_edges is not None else cell_edges(grid.lat)
+    lon_edges = grid.lon_edges if grid.lon_edges is not None else cell_edges(grid.lon)
+    lat_edges = np.clip(lat_edges, -MERCATOR_MAX_LAT, MERCATOR_MAX_LAT)
+    shown = np.flatnonzero(lat_edges[1:] > lat_edges[:-1])  # not wholly beyond Mercator's limit
+    if not shown.size:
         return None  # all of it is too close to a pole for Web Mercator
-    west, east = lon_edges[0], lon_edges[-1]
-    y_s, y_n = mercator_y(south), mercator_y(north)
+    first, last = shown[0], shown[-1] + 1
+    lat_edges, values = lat_edges[first:last + 1], grid.values[first:last]
 
-    # Enough pixels for the smallest cell (in Mercator) to get a few of them.
-    y_edges = mercator_y(lat_edges)
-    min_dy = np.min(np.diff(y_edges)[np.diff(y_edges) > 0], initial=y_n - y_s)
-    min_dx = np.min(np.diff(lon_edges))
-    height = int(np.clip(np.ceil((y_n - y_s) / min_dy * PIXELS_PER_CELL), 1, max_px))
-    width = int(np.clip(np.ceil((east - west) / min_dx * PIXELS_PER_CELL), 1, max_px))
-
-    # Nearest cell for each pixel centre; top row is north.
-    x = west + (np.arange(width) + 0.5) * (east - west) / width
-    lat = inverse_mercator_y(y_n - (np.arange(height) + 0.5) * (y_n - y_s) / height)
-    cols = np.searchsorted(lon_edges, x, side="right") - 1
-    rows = np.searchsorted(lat_edges, lat, side="right") - 1
-    cols_ok = (cols >= 0) & (cols < grid.lon.size)
-    rows_ok = (rows >= 0) & (rows < grid.lat.size)
-    img = grid.values[np.ix_(np.clip(rows, 0, grid.lat.size - 1), np.clip(cols, 0, grid.lon.size - 1))]
-    img = np.where(rows_ok[:, None] & cols_ok[None, :], img, np.nan)
-
-    rgba = _cmap(cmap)(Normalize(vmin, vmax)(np.ma.masked_invalid(img)), bytes=True)
+    rgba = _cmap(cmap)(Normalize(vmin, vmax)(np.ma.masked_invalid(values[::-1])), bytes=True)
     buf = io.BytesIO()
     Image.fromarray(rgba, "RGBA").save(buf, format="png")
-    return Overlay(buf.getvalue(), float(south), float(west), float(north), float(east))
+    return Overlay(buf.getvalue(), float(lat_edges[0]), float(lon_edges[0]), float(lat_edges[-1]),
+                   float(lon_edges[-1]), rows=[float(y) for y in lat_edges[::-1]],
+                   cols=[float(x) for x in lon_edges])
+
+
+@dataclass
+class Cells:
+    """A curvilinear grid's cells as quadrilaterals, see cell_polygons."""
+
+    shape: tuple[int, int]  # (ny, nx) cells
+    lat: list[float]  # corners, (ny + 1) x (nx + 1) row by row
+    lon: list[float]
+    colors: list[str | None]  # per cell, row by row; None where there's no value
+    south: float
+    west: float
+    north: float
+    east: float
+
+
+def cell_polygons(grid: GeoGrid, cmap, vmin, vmax, max_cells=MAX_POLYGON_CELLS) -> Cells | None:
+    """Every cell of a full-resolution curvilinear grid, if there aren't too many.
+
+    The corners are the ones the grid lines are drawn with, so the two match.
+    None when an image has to do instead.
+    """
+    if grid.kind != "curvilinear" or grid.slice.downsampled:
+        return None
+    if grid.values.size > max_cells or min(grid.values.shape) < 2:
+        return None
+    lat, lon = cell_corners(grid.lat), cell_corners(unwrap_lon(grid.lon))
+    ok = np.isfinite(lat) & np.isfinite(lon)
+    if not ok.any():
+        return None
+    corners_ok = ok[:-1, :-1] & ok[1:, :-1] & ok[:-1, 1:] & ok[1:, 1:]
+    values = np.where(corners_ok, np.asarray(grid.values, dtype=float), np.nan)
+    colors = point_colors(values.ravel(), cmap, vmin, vmax)
+    return Cells(values.shape, np.round(lat, 6).ravel().tolist(), np.round(lon, 6).ravel().tolist(),
+                 colors, float(np.min(lat[ok])), float(np.min(lon[ok])),
+                 float(np.max(lat[ok])), float(np.max(lon[ok])))
 
 
 def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
@@ -112,6 +148,7 @@ def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
     ny, nx = values.shape
     width = int(np.clip(nx * PIXELS_PER_CELL, 256, max_px))
     height = int(np.clip(ny * PIXELS_PER_CELL, 256, max_px))
+    width, height = _image_size(width, height, max_px)
 
     fig = Figure(figsize=(width / 100, height / 100), dpi=100, facecolor="none")
     FigureCanvasAgg(fig)

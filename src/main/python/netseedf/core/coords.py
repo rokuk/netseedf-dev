@@ -100,6 +100,10 @@ class GeoGrid:
     # Full-resolution index along each grid axis of every row/column (or point).
     index: tuple = ()
     lon_0_360: bool = False  # longitudes are in 0..360 rather than -180..180
+    # Regular grids: edges of the drawn rows/columns (ny + 1, nx + 1). Always edges of
+    # full-resolution cells, so a thinned-out grid lines up with the real one.
+    lat_edges: np.ndarray | None = None
+    lon_edges: np.ndarray | None = None
 
     @property
     def bounds(self):
@@ -131,7 +135,41 @@ def geo_grid(da: xr.DataArray, geo: GeoInfo, indices, max_size=None, window=None
         rows, cols = np.argsort(lat, kind="stable"), np.argsort(lon, kind="stable")
         lat, lon, values = lat[rows], lon[cols], values[np.ix_(rows, cols)]
         index = (index[0][rows], index[1][cols])
+        full_lon = normalize_lon(np.asarray(geo.lon.values, dtype=float), lon_0_360)[0]
+        return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360,
+                       block_edges(np.asarray(geo.lat.values, dtype=float), lat),
+                       block_edges(full_lon, lon))
     return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360)
+
+
+def cell_edges(centres):
+    """Edges between 1D cell centres, extending half a cell at both ends."""
+    c = np.asarray(centres, dtype=float)
+    if c.size == 1:
+        return np.array([c[0] - 0.5, c[0] + 0.5])
+    mid = (c[:-1] + c[1:]) / 2
+    return np.concatenate([[c[0] - (mid[0] - c[0])], mid, [c[-1] + (c[-1] - mid[-1])]])
+
+
+def block_edges(full, centres):
+    """Edges of the cells drawn at `centres`, some (sorted) values of the coordinate `full`.
+
+    When the grid is thinned out, each drawn cell stands for the real cells
+    halfway to its neighbours (at the ends: all the way to where the next one
+    would be, so the skipped cells there are covered too). Its edges are real
+    cell edges, not midpoints between the drawn centres, so it lines up with
+    the full-resolution grid.
+    """
+    full = np.sort(full)
+    edges = cell_edges(full)
+    pos = np.clip(np.searchsorted(full, centres), 0, full.size - 1)
+    if pos.size == 1:
+        return edges[[pos[0], pos[0] + 1]]
+    gaps = np.diff(pos)
+    inner = pos[:-1] + (gaps + 1) // 2
+    first = max(pos[0] - gaps[0] + 1, 0)
+    last = min(pos[-1] + gaps[-1], full.size)
+    return edges[np.concatenate([[first], inner, [last]])]
 
 
 def with_cyclic_column(grid: GeoGrid) -> GeoGrid:
@@ -147,7 +185,11 @@ def with_cyclic_column(grid: GeoGrid) -> GeoGrid:
     lon = np.append(grid.lon, grid.lon[0] + 360)
     values = np.concatenate([grid.values, grid.values[:, :1]], axis=1)
     index = (grid.index[0], np.append(grid.index[1], grid.index[1][0])) if grid.index else ()
-    return GeoGrid(grid.kind, grid.lat, lon, values, grid.slice, index, grid.lon_0_360)
+    lon_edges = grid.lon_edges
+    if lon_edges is not None:  # the last column now reaches the repeated first one
+        lon_edges = np.concatenate([lon_edges[:-1], lon_edges[:2] + 360])
+    return GeoGrid(grid.kind, grid.lat, lon, values, grid.slice, index, grid.lon_0_360,
+                   grid.lat_edges, lon_edges)
 
 
 def _coord_slice(var: xr.DataArray, sl: Slice) -> np.ndarray:

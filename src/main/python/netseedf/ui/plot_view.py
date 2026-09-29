@@ -118,7 +118,7 @@ class PlotView(DataView):
         self.y = QComboBox(toolTip="Dimension along the y axis (heatmap)")
         self.y_label = QLabel("Y:")
         self.style_bar = StyleBar()
-        self.note = QLabel()
+        self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
         for w in (self.kind, QLabel("X:"), self.x, self.y_label, self.y):
             bar.addWidget(w)
@@ -176,7 +176,7 @@ class PlotView(DataView):
             if da is not None and da.ndim:
                 self.x.setCurrentText(_longest_dim(da))
         self._show_controls()
-        self.style_bar.reset_lock()
+        self.style_bar.reset_range()
         self.mpl.reset()
         self._updating = False
 
@@ -211,7 +211,7 @@ class PlotView(DataView):
         # Zooming or panning (including the zoom kept from before) may call for more detail.
         for event in ("xlim_changed", "ylim_changed"):
             self._ax.callbacks.connect(event, lambda _ax: self._detail_timer.start())
-        self._detail_timer.start()
+        self._update_detail()  # now, so a kept zoom never shows the overview alone
 
     def _title(self, sl):
         where = selection_text(self.state.da, sl.fixed)

@@ -191,6 +191,7 @@ def test_map_loads_detail_when_zoomed(window, samples, monkeypatch):
 
     from netseedf.ui import cartopy_map_view
     monkeypatch.setattr(cartopy_map_view, "MAX_SIZE_IMAGE", 30)
+    monkeypatch.setattr(cartopy_map_view, "MAX_SIZE_MESH", 30)
     window.open_path(samples["regular_global.nc"])
     window.tabs.setCurrentWidget(window.map)
     view, sst = window.map, window.state.da
@@ -240,6 +241,9 @@ def test_web_map_click_popup(window, samples):
     assert info["value"].endswith(" psu")
     assert "time = 2022-02-01" in info["at"] and "depth = " in info["at"]
     assert info["export"] == "Export time series (3 values)…"
+    da = window.state.da
+    lat, lon = da.lat.sel(lat=50.3, method="nearest"), da.lon.sel(lon=5.2, method="nearest")
+    assert (info["lat"], info["lon"]) == pytest.approx((float(lat), float(lon)))  # cell centre
     assert view.pick(10, 0) is None  # outside the data
     assert view._picked is None
 
@@ -298,6 +302,37 @@ def test_colormap_is_shared_between_views(window, samples):
     window.tabs.setCurrentWidget(window.plot)
     assert window.plot.style_bar.style().cmap == "turbo"
     assert _drawn_cmaps(window.plot) == {"turbo"}
+
+
+def test_colour_range_auto_or_typed(window, samples):
+    window.open_path(samples["four_d.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view, bar = window.map, window.map.style_bar
+    sal = window.state.da
+
+    def slice_range():
+        sl = sal.isel({d: window.state.indices.get(d, 0) for d in ("time", "depth")})
+        return pytest.approx((float(sl.min()), float(sl.max())), rel=1e-5)
+
+    assert bar.auto.isChecked() and view._limits == slice_range()
+    bar.vmin.editingFinished.emit()  # left the box without typing: still automatic
+    assert bar.auto.isChecked()
+
+    bar.vmin.setText("30")
+    bar.vmin.setModified(True)  # as if typed
+    bar.vmin.editingFinished.emit()
+    assert not bar.auto.isChecked()
+    typed = view._limits
+    assert typed[0] == 30
+    window.state.set_indices({"time": 2})  # the typed range stays while stepping through time
+    assert view._limits == typed and view._limits != slice_range()
+
+    bar.auto.setChecked(True)
+    assert view._limits == slice_range()
+
+    bar.auto.setChecked(False)
+    window.open_path(samples["regular_global.nc"])  # another variable: automatic again
+    assert bar.auto.isChecked()
 
 
 def test_web_map_grid_lines(window, samples, monkeypatch):

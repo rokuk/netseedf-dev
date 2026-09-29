@@ -41,7 +41,13 @@ from netseedf.core.formatting import (
     variable_label,
 )
 from netseedf.core.gridlines import grid_lines
-from netseedf.core.render import legend_colors, point_colors, render_overlay
+from netseedf.core.render import (
+    MAX_POLYGON_CELLS,
+    cell_polygons,
+    legend_colors,
+    point_colors,
+    render_overlay,
+)
 from netseedf.core.slicing import fixed_indices, is_finer, point_series, series_frame, time_dims
 from netseedf.ui.base_view import DataView, wait_cursor
 from netseedf.ui.cartopy_map_view import NO_GEO_MESSAGE
@@ -102,7 +108,7 @@ class WebMapView(DataView):
                                maximumWidth=120, toolTip="Opacity of the data layer")
         self.grid_lines = QCheckBox("Grid lines", toolTip="Outline the cells of the data grid "
                                     "(when zoomed in far enough to draw them all)")
-        self.note = QLabel()
+        self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
         for w in (self.style_bar, QLabel("Opacity:"), self.opacity, self.grid_lines):
             bar.addWidget(w)
@@ -115,6 +121,7 @@ class WebMapView(DataView):
         self._pending: dict[str, str] = {}
         self._locator = self._detail_locator = None
         self._grid = self._detail = None
+        self._overview_cells = False  # the overview is drawn as polygons, see _wants_detail
         self._picked = None  # the cell last clicked on, see pick()
         self._view_box = None  # visible (west, east, south, north), from the page
         self._grid_note = ""  # why grid lines aren't shown, if they aren't
@@ -143,7 +150,7 @@ class WebMapView(DataView):
         self._locator = self._detail_locator = self._grid = self._detail = None
         self._picked = None
         self._call("closePopup")
-        self.style_bar.reset_lock()
+        self.style_bar.reset_range()
 
     def _redraw(self):
         if self.state.da is not None and self.isVisible():
@@ -174,9 +181,10 @@ class WebMapView(DataView):
         self.grid_lines.setToolTip("Stations have no grid cells to outline." if grid.kind == "points"
                                    else "Outline the cells of the data grid "
                                         "(when zoomed in far enough to draw them all)")
+        self._overview_cells = payload["kind"] == "cells"
         self._call("setData", payload)
         self._update_note()
-        self._detail_timer.start()  # the map may be zoomed in already
+        self._update_detail()  # now: the map may be zoomed in already
 
     def _payload(self, grid):
         vmin, vmax = self._limits
@@ -186,11 +194,19 @@ class WebMapView(DataView):
             return {"kind": "points", "points": [
                 [float(la), float(lo), c] for la, lo, c in zip(grid.lat[ok], grid.lon[ok], colors,
                                                                strict=True)]}
+        cells = cell_polygons(grid, self._cmap, vmin, vmax)
+        if cells is not None:  # few enough cells to draw each one exactly
+            return {"kind": "cells", "shape": cells.shape, "lat": cells.lat, "lon": cells.lon,
+                    "colors": cells.colors,
+                    "bounds": [[cells.south, cells.west], [cells.north, cells.east]]}
         overlay = render_overlay(grid, self._cmap, vmin, vmax)
         if overlay is None:
             return None
-        return {"kind": "image", "url": overlay.data_url,
-                "bounds": [[overlay.south, overlay.west], [overlay.north, overlay.east]]}
+        payload = {"kind": "image", "url": overlay.data_url,
+                   "bounds": [[overlay.south, overlay.west], [overlay.north, overlay.east]]}
+        if overlay.rows is not None:
+            payload.update(kind="grid", rows=overlay.rows, cols=overlay.cols)
+        return payload
 
     def _update_note(self):
         if self._grid is not None:
@@ -233,6 +249,7 @@ class WebMapView(DataView):
             "title": str(da.name),
             "value": value_text(da, picked.value),
             "position": position_text(picked.lat, picked.lon),
+            "lat": float(picked.lat), "lon": float(picked.lon),  # the popup points at the cell centre
             "cell": ", ".join(f"{d} #{i}" for d, i in picked.index.items()),
             "at": selection_text(da, fixed_indices(da, geo.dims, indices)),
             "export": f"Export time series ({steps} values)…" if series_dims else None,
@@ -282,7 +299,7 @@ class WebMapView(DataView):
         da, geo = self.state.da, self.state.geo
         window = geo_window(geo, self._grid, box)
         detail = payload = None
-        if window is not None and is_finer(self._grid.slice, window, self._max_size):
+        if window is not None and self._wants_detail(window):
             detail = geo_grid(da, geo, self.state.indices, self._max_size, window, like=self._grid)
             payload = self._payload(detail)
         if payload is None:
@@ -296,6 +313,16 @@ class WebMapView(DataView):
             self._detail, self._detail_locator = detail, GridLocator(detail)
             self._tracker.remember(visible, (x0, x1, y0, y1))
         self._update_note()
+
+    def _wants_detail(self, window):
+        """Would loading `window` show more than the overview: finer, or cells as polygons?"""
+        if is_finer(self._grid.slice, window, self._max_size):
+            return True
+        # A full-resolution curvilinear overview with too many cells for polygons is an
+        # image; zoomed in, few enough of them may be in view to draw exactly.
+        sizes = [stop - start for start, stop in window.values()]
+        return (self._grid.kind == "curvilinear" and not self._overview_cells
+                and max(sizes) <= self._max_size and int(np.prod(sizes)) <= MAX_POLYGON_CELLS)
 
     # --- grid lines ---------------------------------------------------------------
 

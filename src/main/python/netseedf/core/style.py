@@ -7,34 +7,25 @@ import numpy as np
 COLORMAPS = ["viridis", "inferno", "magma", "plasma", "cividis", "turbo", "coolwarm", "RdBu_r", "BrBG",
              "Blues", "YlGnBu", "Greys", "terrain", "twilight"]
 
-RANGE_AUTO = "Min–max"
-RANGE_ROBUST = "Robust (2–98 %)"
-RANGE_MANUAL = "Manual"
-RANGE_MODES = [RANGE_AUTO, RANGE_ROBUST, RANGE_MANUAL]
-
 
 @dataclass
 class Style:
     cmap: str = "viridis"
-    range_mode: str = RANGE_AUTO
-    vmin: float = 0.0  # used in manual mode
+    auto: bool = True  # the range is the data's min–max, else vmin..vmax
+    vmin: float = 0.0
     vmax: float = 1.0
 
     def limits(self, values: np.ndarray) -> tuple[float, float]:
-        if self.range_mode == RANGE_MANUAL:
-            return _widen(self.vmin, self.vmax)
-        return data_limits(values, robust=self.range_mode == RANGE_ROBUST)
+        if self.auto:
+            return data_limits(values)
+        return _widen(self.vmin, self.vmax)
 
 
-def data_limits(values, robust=False) -> tuple[float, float]:
+def data_limits(values) -> tuple[float, float]:
     finite = values[np.isfinite(values)] if values.size else values
     if finite.size == 0:
         return 0.0, 1.0
-    if robust:
-        lo, hi = np.percentile(finite, [2, 98])
-    else:
-        lo, hi = finite.min(), finite.max()
-    return _widen(float(lo), float(hi))
+    return _widen(float(finite.min()), float(finite.max()))
 
 
 def _widen(lo, hi):

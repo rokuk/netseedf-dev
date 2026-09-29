@@ -3,8 +3,7 @@
 import numpy as np
 import xarray as xr
 
-from netseedf.core.coords import GeoGrid, GeoInfo, geo_grid, geo_window, normalize_lon
-from netseedf.core.render import cell_edges
+from netseedf.core.coords import GeoGrid, GeoInfo, cell_edges, geo_grid, geo_window, normalize_lon
 
 Line = list[list[float]]  # [[lat, lon], ...]
 
@@ -56,11 +55,15 @@ def _curvilinear_lines(da, geo, grid, indices, box, max_lines):
     fine = geo_grid(da, geo, indices, None, window, like=grid)
     if min(fine.lat.shape) < 2:
         return []
-    lon = np.rad2deg(np.unwrap(np.unwrap(np.deg2rad(fine.lon), axis=1), axis=0))
-    lat, lon = cell_corners(fine.lat), cell_corners(lon)
+    lat, lon = cell_corners(fine.lat), cell_corners(unwrap_lon(fine.lon))
     rows = [np.column_stack([lat[i], lon[i]]) for i in range(lat.shape[0])]
     cols = [np.column_stack([lat[:, j], lon[:, j]]) for j in range(lat.shape[1])]
     return [part for line in rows + cols for part in _finite_runs(line)]
+
+
+def unwrap_lon(lon: np.ndarray) -> np.ndarray:
+    """2D longitudes without jumps of 360° (across the antimeridian), for drawing cells."""
+    return np.rad2deg(np.unwrap(np.unwrap(np.deg2rad(lon), axis=1), axis=0))
 
 
 def cell_corners(centres: np.ndarray) -> np.ndarray:

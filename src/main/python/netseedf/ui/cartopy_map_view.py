@@ -8,7 +8,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import numpy as np
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout
 
 from netseedf.core.coords import GridLocator, geo_grid, geo_window, with_cyclic_column
 from netseedf.core.detail import DetailTracker, padded, resolution_note
@@ -74,14 +74,11 @@ class CartopyMapView(DataView):
         super().__init__(state, parent)
         self.projection = QComboBox()
         self.projection.addItems(PROJECTIONS)
-        self.coastlines = QCheckBox("Coastlines", checked=True)
-        self.borders = QCheckBox("Borders", checked=True)
-        self.gridlines = QCheckBox("Grid", checked=True)
+        self.projection.setCurrentText("Equal Earth")
         self.style_bar = StyleBar()
-        self.note = QLabel()
+        self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
-        for w in (QLabel("Projection:"), self.projection, self.coastlines, self.borders,
-                  self.gridlines):
+        for w in (QLabel("Projection:"), self.projection):
             bar.addWidget(w)
         bar.addWidget(self.note, 1)
         self.mpl = MplWidget()
@@ -91,8 +88,6 @@ class CartopyMapView(DataView):
         layout.setContentsMargins(4, 4, 4, 0)
         layout.addLayout(bar)
         layout.addWidget(self.mpl, 1)
-        for w in (self.coastlines, self.borders, self.gridlines):
-            w.toggled.connect(self._redraw)
         self.projection.currentTextChanged.connect(self._redraw)
         self.style_bar.changed.connect(self._redraw)
         self._detail_timer = QTimer(self, singleShot=True, interval=DETAIL_DELAY_MS)
@@ -113,7 +108,7 @@ class CartopyMapView(DataView):
         return geo.dims if geo is not None else super().free_dims()
 
     def variable_changed(self):
-        self.style_bar.reset_lock()
+        self.style_bar.reset_range()
         self.mpl.reset()
 
     def _redraw(self):
@@ -145,14 +140,11 @@ class CartopyMapView(DataView):
         ax = self.mpl.figure.add_subplot(projection=proj)
         artist = self._draw(ax, with_cyclic_column(grid), detail=False)
         self._set_extent(ax, name, grid, lon0)
-        if self.coastlines.isChecked():
-            ax.add_feature(COASTLINES, facecolor="none", edgecolor="black", linewidth=0.6,
-                           zorder=Z_FEATURES)
-        if self.borders.isChecked():
-            ax.add_feature(BORDERS, facecolor="none", edgecolor="0.3", linewidth=0.4,
-                           zorder=Z_FEATURES)
-        if self.gridlines.isChecked():
-            ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.6, linestyle="--")
+        ax.add_feature(COASTLINES, facecolor="none", edgecolor="black", linewidth=0.6,
+                       zorder=Z_FEATURES)
+        ax.add_feature(BORDERS, facecolor="none", edgecolor="0.3", linewidth=0.4,
+                       zorder=Z_FEATURES)
+        ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.6, linestyle="--")
 
         self.mpl.figure.colorbar(artist, ax=ax, orientation="horizontal", shrink=0.7, pad=0.02,
                                  aspect=40, label=variable_label(da))
@@ -174,7 +166,7 @@ class CartopyMapView(DataView):
         # Zooming or panning (including the zoom kept from before) may call for more detail.
         for event in ("xlim_changed", "ylim_changed"):
             ax.callbacks.connect(event, lambda _ax: self._detail_timer.start())
-        self._detail_timer.start()
+        self._update_detail()  # now, so a kept zoom never shows the overview alone
 
     def _draw(self, ax, grid, detail):
         vmin, vmax = self._limits
