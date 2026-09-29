@@ -10,6 +10,7 @@ from netseedf.core.style import COLORMAPS, RANGE_MANUAL, RANGE_MODES, Style
 
 class StyleBar(QWidget):
     changed = Signal()
+    cmapPicked = Signal(str)  # the user chose another colormap here
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -30,6 +31,7 @@ class StyleBar(QWidget):
                   QLabel("–"), self.vmax, self.lock):
             layout.addWidget(w)
         self.cmap.currentTextChanged.connect(self.changed)
+        self.cmap.currentTextChanged.connect(self.cmapPicked)
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.lock.toggled.connect(self._lock_toggled)
         self._locked: tuple[float, float] | None = None
@@ -54,6 +56,12 @@ class StyleBar(QWidget):
 
     def reset_lock(self):
         self._locked = None
+
+    def set_cmap(self, name):
+        """Follow a colormap chosen elsewhere, quietly: neither signal is emitted."""
+        self.cmap.blockSignals(True)
+        self.cmap.setCurrentText(name)
+        self.cmap.blockSignals(False)
 
     def _mode_changed(self):
         manual = self.mode.currentText() == RANGE_MANUAL

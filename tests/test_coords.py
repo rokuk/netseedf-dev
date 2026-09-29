@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from netseedf.core.coords import GridLocator, find_geo, geo_grid, normalize_lon
+from netseedf.core.coords import GridLocator, find_geo, geo_grid, normalize_lon, pick_point
 
 
 @pytest.fixture
@@ -117,3 +117,37 @@ def test_curvilinear_locator(ds):
     assert loc.nearest(-30, 100) is None
     (_, value) = loc.value_at(grid.lat[5, 5], grid.lon[5, 5])
     assert value == grid.values[5, 5]
+
+
+def test_pick_point_finds_the_full_resolution_cell(ds):
+    d = ds("regular_global.nc")
+    da, geo = d["sst"], find_geo(d["sst"], d)
+    coarse = geo_grid(da, geo, {"time": 1}, max_size=45)  # every 2nd lat, 4th lon
+    assert 47 not in coarse.lat and 14 not in coarse.lon
+    picked = pick_point(da, geo, coarse, 47.3, 13.8, {"time": 1})
+    assert (picked.lat, picked.lon) == (47, 14)
+    assert picked.value == pytest.approx(float(da.isel(time=1, **picked.index)))
+    assert float(da.lat[picked.index["lat"]]) == 47
+    assert float(da.lon[picked.index["lon"]]) == 14
+
+
+def test_pick_point_outside_data(ds):
+    d = ds("four_d.nc")
+    da, geo = d["salinity"], find_geo(d["salinity"], d)
+    assert pick_point(da, geo, geo_grid(da, geo, {}), 10, 0, {}) is None
+
+
+def test_pick_point_curvilinear_and_points(ds):
+    d = ds("curvilinear.nc")
+    da, geo = d["temp"], find_geo(d["temp"], d)
+    grid = geo_grid(da, geo, {})
+    picked = pick_point(da, geo, grid, grid.lat[7, 3], grid.lon[7, 3], {})
+    assert picked.index == {"y": 7, "x": 3}
+    d = ds("points.nc")
+    da, geo = d["precip"], find_geo(d["precip"], d)
+    lat, lon = float(d.lat[12]), float(d.lon[12])
+    coarse = geo_grid(da, geo, {}, max_size=10)  # every 5th station
+    assert 12 not in coarse.index[0]
+    picked = pick_point(da, geo, coarse, lat, lon, {})
+    assert picked.index == {"station": 12}
+    assert (picked.lat, picked.lon) == pytest.approx((lat, lon))

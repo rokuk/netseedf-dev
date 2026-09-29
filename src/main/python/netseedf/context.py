@@ -21,7 +21,7 @@ except ImportError:
     ApplicationContext = PUBLIC_SETTINGS = None
 
 # The settings the app reads (all listed in "public_settings" in base.json).
-SETTING_KEYS = ("app_name", "author", "version", "homepage")
+SETTING_KEYS = ("app_name", "author", "version", "homepage", "contact")
 
 PROJECT_DIR = Path(__file__).resolve().parents[4]  # only meaningful when running from source
 

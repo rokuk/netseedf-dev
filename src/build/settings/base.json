@@ -4,7 +4,8 @@
     "main_module": "src/main/python/main.py",
     "version": "0.1.0",
     "homepage": "https://github.com/rokuk/netseedf-dev",
-    "public_settings": ["homepage"],
+    "contact": "kontakt@rokuk.org",
+    "public_settings": ["homepage", "contact"],
     "hidden_imports": [],
     "extra_pyinstaller_args": [
         "--copy-metadata", "xarray",

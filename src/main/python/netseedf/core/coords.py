@@ -230,11 +230,12 @@ def lon_diff(a, b):
 class GridLocator:
     """Finds the grid cell under a lat/lon position (e.g. the mouse)."""
 
-    def __init__(self, grid: GeoGrid):
+    def __init__(self, grid: GeoGrid, tolerance=None):
+        """`tolerance`: how far (in degrees) a point may be from a position to count."""
         self.grid = grid
         if grid.kind != "regular":
-            self._tolerance = self._typical_spacing() if grid.kind == "curvilinear" \
-                else max(0.02 * float(np.hypot(*_extent(grid))), 0.05)
+            self._tolerance = tolerance or (self._typical_spacing() if grid.kind == "curvilinear"
+                                            else max(0.02 * float(np.hypot(*_extent(grid))), 0.05))
 
     def nearest(self, lat, lon):
         """Index into grid.values, or None when outside the data."""
@@ -263,6 +264,51 @@ class GridLocator:
                  if lat.shape[a] > 1]
         spacing = np.nanmedian(np.concatenate([s.ravel() for s in steps])) if steps else 1.0
         return float(spacing) if np.isfinite(spacing) and spacing > 0 else 1.0
+
+
+
+@dataclass
+class PickedPoint:
+    """The full-resolution grid cell (or point) at a clicked position."""
+
+    lat: float
+    lon: float
+    value: float
+    index: dict[str, int]  # index along each of the grid's dims
+
+
+def pick_point(da: xr.DataArray, geo: GeoInfo, grid: GeoGrid, lat, lon, indices) -> PickedPoint | None:
+    """The cell under lat/lon at full resolution, even if `grid` is downsampled.
+
+    `grid` finds the neighbourhood; the cells the stride skipped around it are
+    then read to find the nearest one. Points (stations) come in no particular
+    order, so for them every point near lat/lon is read instead.
+    """
+    locator = GridLocator(grid)
+    found = locator.nearest(lat, lon)
+    sl = grid.slice
+    if sl.downsampled and grid.kind == "points":
+        tol = locator._tolerance
+        dlon = tol / max(np.cos(np.deg2rad(lat)), 0.1)
+        window = point_window(geo, grid, (lat - tol, lon - dlon, lat + tol, lon + dlon))
+        if window is not None:
+            fine = geo_grid(da, geo, indices, None, window, like=grid)
+            grid, found = fine, GridLocator(fine, tolerance=tol).nearest(lat, lon)
+    elif sl.downsampled and found is not None:
+        centre = [int(grid.index[axis][found[axis]]) for axis in range(len(sl.dims))]
+        window = {d: (c - step, c + step + 1) for d, c, step in zip(sl.dims, centre, sl.steps, strict=True)}
+        fine = geo_grid(da, geo, indices, None, window, like=grid)
+        fine_found = GridLocator(fine).nearest(lat, lon)
+        if fine_found is not None:
+            grid, found = fine, fine_found
+    if found is None:
+        return None
+    index = {d: int(grid.index[axis][found[axis]]) for axis, d in enumerate(grid.slice.dims)}
+    if grid.kind == "regular":
+        cell_lat, cell_lon = grid.lat[found[0]], grid.lon[found[1]]
+    else:
+        cell_lat, cell_lon = grid.lat[found], grid.lon[found]
+    return PickedPoint(float(cell_lat), float(cell_lon), float(grid.values[found]), index)
 
 
 def _extent(grid):

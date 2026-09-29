@@ -4,7 +4,10 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 import xarray as xr
+
+from netseedf.core.formatting import is_time_like
 
 # Strided reads can be slow in netCDF-C, so slices up to this many elements
 # are read contiguously and thinned in memory.
@@ -94,6 +97,45 @@ def load_selection(sub: xr.DataArray, selection) -> np.ndarray:
         return np.asarray(sub.values)[tuple(local)]
     return np.asarray(sub.isel(dict(zip(sub.dims, local, strict=True))).values)
 
+
+
+def is_time_dim(da: xr.DataArray, dim) -> bool:
+    """Does `dim` run through time (by its coordinate, CF attributes or name)?"""
+    coord = da.coords.get(dim)
+    if coord is not None:
+        attrs = coord.attrs
+        if (is_time_like(coord.values) or attrs.get("axis") == "T"
+                or attrs.get("standard_name") == "time" or " since " in str(attrs.get("units", ""))):
+            return True
+    return str(dim).lower() in ("time", "t", "times")
+
+
+def time_dims(da: xr.DataArray, exclude=()) -> tuple[str, ...]:
+    return tuple(d for d in da.dims if d not in exclude and is_time_dim(da, d))
+
+
+def point_series(da: xr.DataArray, point: dict[str, int], indices) -> xr.DataArray:
+    """The not-yet-loaded values at `point` for every time step.
+
+    `point` gives the index along some dims (e.g. a grid cell's y and x);
+    dims that are neither those nor time are held at `indices`.
+    """
+    fixed = fixed_indices(da, time_dims(da, exclude=point), {**indices, **point})
+    return da.isel(fixed)
+
+
+def series_frame(series: xr.DataArray, extra: dict | None = None) -> pd.DataFrame:
+    """A point's time series as a table: one row per time step, coordinates as columns.
+
+    `extra` adds constant columns (e.g. the latitude and longitude of the
+    point when they aren't coordinates of the variable), placed first.
+    """
+    name = str(series.name) if series.name is not None else "value"
+    frame = series.to_dataframe(name=name)
+    new = {col: value for col, value in (extra or {}).items() if col not in frame.columns}
+    for i, (col, value) in enumerate(new.items()):
+        frame.insert(i, col, value)
+    return frame
 
 def coord_values(da: xr.DataArray, dim, sel=slice(None)) -> np.ndarray | None:
     """Values of the 1D coordinate along `dim` (at `sel`), if the variable has one."""

@@ -9,13 +9,17 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 from PySide6 import QtWebEngineWidgets  # noqa: E402, F401 (must precede the QApplication)
 from PySide6.QtCore import QSettings  # noqa: E402
+from PySide6.QtWidgets import QFileDialog  # noqa: E402
 
 from netseedf.context import SourceContext  # noqa: E402
+from netseedf.core.coords import geo_grid  # noqa: E402
+from netseedf.ui import web_map_view  # noqa: E402
 from netseedf.ui.cartopy_map_view import configure_offline_data  # noqa: E402
-from netseedf.ui.main_window import MainWindow  # noqa: E402
+from netseedf.ui.main_window import MainWindow, user_agent  # noqa: E402
 from netseedf.ui.table_view import to_frame  # noqa: E402
 
 RESOURCES = Path(__file__).resolve().parents[1] / "src" / "main" / "resources" / "base"
@@ -78,7 +82,7 @@ def test_sliders_follow_state(window, samples):
         float(window.state.da.isel(time=0, depth=3, lat=0, lon=0)))
 
 
-def test_index_kept_when_switching_variables(window, samples):
+def test_time_starts_at_first_step_when_switching_variables(window, samples):
     window.open_path(samples["points.nc"])
     items = {i.text(0): i for i in window.tree.variable_items(window.tree.current_file_id())}
     window.tree.setCurrentItem(items["precip"])
@@ -86,9 +90,19 @@ def test_index_kept_when_switching_variables(window, samples):
     window.tree.setCurrentItem(items["elevation"])  # has no time dimension
     window.tree.setCurrentItem(items["precip"])
     window.tabs.setCurrentWidget(window.map)  # maps stations; time gets a slider
-    assert window.state.indices["time"] == 4
+    assert window.state.indices["time"] == 0
     assert [r.dim for r in window.dims._rows] == ["time"]
-    assert window.dims._rows[0].slider.value() == 4
+    assert window.dims._rows[0].slider.value() == 0
+
+
+def test_depth_kept_when_switching_variables(window, samples):
+    window.open_path(samples["four_d.nc"])
+    window.tabs.setCurrentWidget(window.table)
+    window.state.set_indices({"time": 2, "depth": 3})
+    item = window.tree.currentItem()
+    window.tree.setCurrentItem(window.tree.file_item(window.tree.current_file_id()))
+    window.tree.setCurrentItem(item)
+    assert window.state.indices == {"time": 0, "depth": 3}
 
 
 def test_opening_the_same_file_twice_selects_it(window, samples):
@@ -117,7 +131,7 @@ def test_source_context_finds_resources():
     ctx = SourceContext.__new__(SourceContext)  # without creating a second QApplication
     assert Path(ctx.get_resource("web", "map.html")).is_file()
     assert Path(ctx.get_resource("Icon.ico")).is_file()
-    assert ctx.build_settings["app_name"] == "netseedf"
+    assert ctx.build_settings["app_name"] == "NetSeeDF"
 
 
 # --- more detail after zooming in -------------------------------------------------
@@ -208,3 +222,98 @@ def test_map_detail_for_stations(window, samples, monkeypatch):
     visible = np.flatnonzero((lat >= y0) & (lat <= y1) & (lon >= x0) & (lon <= x1))
     assert any(i % 2 for i in visible)  # stations the overview skipped...
     assert set(visible) <= set(view._detail.index[0])  # ...are all shown now
+
+
+def _show_on_web_map(window, samples, name):
+    """What the web map's refresh() sets up, without the page (it needs a GPU)."""
+    window.open_path(samples[name])
+    view, state = window.web_map, window.state
+    view._grid = geo_grid(state.da, state.geo, state.indices, max_size=10)
+    return view
+
+
+def test_web_map_click_popup(window, samples):
+    view = _show_on_web_map(window, samples, "four_d.nc")
+    window.state.set_indices({"time": 1, "depth": 2})
+    info = view.pick(50.3, 5.2)
+    assert info["title"] == "salinity"
+    assert info["value"].endswith(" psu")
+    assert "time = 2022-02-01" in info["at"] and "depth = " in info["at"]
+    assert info["export"] == "Export time series (3 values)…"
+    assert view.pick(10, 0) is None  # outside the data
+    assert view._picked is None
+
+
+def test_web_map_export_time_series(window, samples, tmp_path, monkeypatch):
+    view = _show_on_web_map(window, samples, "four_d.nc")
+    window.state.set_indices({"depth": 2})
+    view.pick(50.3, 5.2)
+    path = tmp_path / "point.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(path), ""))
+    view.export_point()
+    frame = pd.read_csv(path)
+    da, index = window.state.da, view._picked.index
+    assert list(frame["time"]) == ["2022-01-01", "2022-02-01", "2022-03-01"]
+    np.testing.assert_allclose(frame["salinity"], da.isel(depth=2, **index).values, rtol=1e-6)
+    assert (frame["lat"] == view._picked.lat).all()
+
+
+def test_web_map_no_export_without_time(window, samples):
+    view = _show_on_web_map(window, samples, "points.nc")
+    items = {i.text(0): i for i in window.tree.variable_items(window.tree.current_file_id())}
+    window.tree.setCurrentItem(items["elevation"])  # has no time dimension
+    view._grid = geo_grid(window.state.da, window.state.geo, {}, max_size=10)
+    station = window.state.da.station.size // 2
+    info = view.pick(float(window.state.da.lat[station]), float(window.state.da.lon[station]))
+    assert info["value"].endswith(" m")
+    assert info["export"] is None
+
+
+def test_user_agent_names_app_homepage_and_contact():
+    settings = {"app_name": "NetSeeDF", "version": "0.1.0", "homepage": "https://example.org",
+                "contact": "maps@example.org"}
+    assert user_agent(settings) == "NetSeeDF/0.1.0 (+https://example.org; contact: maps@example.org)"
+    assert user_agent(SETTINGS) == "netseedf/0.0.0 (+https://example.org)"
+    assert user_agent({"app_name": "a", "version": "1"}) == "a/1"
+
+
+def _drawn_cmaps(view):
+    """Names of the colormaps of everything colour-mapped in a view's figure."""
+    return {m.get_cmap().name for ax in view.mpl.figure.axes for m in [*ax.images, *ax.collections]
+            if m.get_array() is not None}
+
+
+def test_colormap_is_shared_between_views(window, samples):
+    window.open_path(samples["regular_global.nc"])
+    window.tabs.setCurrentWidget(window.plot)
+    window.plot.kind.setCurrentText("Heatmap")
+    window.plot.style_bar.cmap.setCurrentText("magma")
+    assert _drawn_cmaps(window.plot) == {"magma"}
+    assert window.map.style_bar.style().cmap == window.web_map.style_bar.style().cmap == "magma"
+
+    window.tabs.setCurrentWidget(window.map)  # hidden while the colormap changed: redrawn now
+    assert _drawn_cmaps(window.map) == {"magma"}
+    window.map.style_bar.cmap.setCurrentText("turbo")
+    assert _drawn_cmaps(window.map) == {"turbo"}
+    window.tabs.setCurrentWidget(window.plot)
+    assert window.plot.style_bar.style().cmap == "turbo"
+    assert _drawn_cmaps(window.plot) == {"turbo"}
+
+
+def test_web_map_grid_lines(window, samples, monkeypatch):
+    view = _show_on_web_map(window, samples, "four_d.nc")
+    assert not view.grid_lines.isChecked()  # off by default
+    view._view_box = (-180, 180, -85, 85)  # (west, east, south, north): whole grid in view
+    view.grid_lines.setChecked(True)
+    sent = view._pending["setGridLines"]  # the page isn't there, so the call waits
+    assert sent.startswith("netseedf.setGridLines([[[") and "grid lines" not in view.note.text()
+
+    monkeypatch.setattr(web_map_view, "MAX_GRID_LINES", 10)  # as if zoomed far out
+    view._update_grid_lines()
+    assert view._pending["setGridLines"] == "netseedf.setGridLines(null);"
+    assert "zoom in to see grid lines" in view.note.text()
+
+    view.grid_lines.setChecked(False)
+    assert view._pending["setGridLines"] == "netseedf.setGridLines(null);"
+    assert "grid lines" not in view.note.text()
+

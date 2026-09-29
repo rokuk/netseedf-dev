@@ -31,6 +31,17 @@ from netseedf.ui.web_map_view import WebMapView
 MAX_RECENT = 10
 
 
+def user_agent(build_settings) -> str:
+    """How the app identifies itself to tile servers, e.g.
+    'NetSeeDF/0.1.0 (+https://example.org; contact: maps@example.org)'.
+    """
+    about = [f"+{build_settings['homepage']}"] if build_settings.get("homepage") else []
+    if build_settings.get("contact"):
+        about.append(f"contact: {build_settings['contact']}")
+    app_id = f"{build_settings['app_name']}/{build_settings['version']}"
+    return f"{app_id} ({'; '.join(about)})" if about else app_id
+
+
 class MainWindow(QMainWindow):
     def __init__(self, resources, build_settings, settings: QSettings | None = None):
         super().__init__()
@@ -48,12 +59,11 @@ class MainWindow(QMainWindow):
         left.addWidget(self.attributes)
         left.setSizes([500, 250])
 
-        app_id = f"{build_settings['app_name']}/{build_settings['version']}"
         self.info = InfoView()
         self.table = TableView(self.state)
         self.plot = PlotView(self.state)
         self.map = CartopyMapView(self.state)
-        self.web_map = WebMapView(self.state, resources, app_id, build_settings.get("homepage", ""))
+        self.web_map = WebMapView(self.state, resources, user_agent(build_settings))
         self.views: list[DataView] = [self.table, self.plot, self.map, self.web_map]
         self.tabs = QTabWidget(documentMode=True)
         self.tabs.addTab(self.info, self.info.title)
@@ -61,6 +71,8 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(view, view.title)
             view.freeDimsChanged.connect(lambda v=view: self._free_dims_changed(v))
             view.status.connect(self._show_hover)
+            if hasattr(view, "style_bar"):
+                view.style_bar.cmapPicked.connect(lambda name, v=view: self._cmap_picked(v, name))
         self.dims = DimensionPanel(self.state)
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -259,6 +271,13 @@ class MainWindow(QMainWindow):
         if view is self.current_view():
             self._dirty.add(view)
             self._show_current(rebuild_dims=True)
+
+    def _cmap_picked(self, source, name):
+        """Use the same colormap in every view; the others redraw when next shown."""
+        for view in self.views:
+            if view is not source and hasattr(view, "style_bar"):
+                view.style_bar.set_cmap(name)
+                self._dirty.add(view)
 
     def _show_current(self, rebuild_dims):
         view = self.current_view()

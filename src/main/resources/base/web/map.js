@@ -1,5 +1,5 @@
 // Web map for netseedf. Python drives it through the `netseedf` object below
-// and answers hover queries through the QWebChannel object `bridge`.
+// and answers hover and click queries through the QWebChannel object `bridge`.
 "use strict";
 
 const netseedf = (() => {
@@ -43,6 +43,14 @@ const netseedf = (() => {
   const legend = L.control({ position: "bottomright" });
   legend.onAdd = () => L.DomUtil.create("div", "legend");
   legend.addTo(map);
+
+  // Grid cell outlines go in their own pane, above the data images (which would
+  // otherwise cover the canvas the lines are drawn on).
+  const gridPane = map.createPane("gridlines");
+  gridPane.style.zIndex = 450;
+  gridPane.style.pointerEvents = "none"; // clicks and hovering go to the map beneath
+  const gridLines = L.layerGroup().addTo(map);
+  const gridRenderer = L.canvas({ pane: "gridlines" });
 
   let dataLayer = null; // overview of all the data
   let detailLayer = null; // the visible part in more detail, after zooming in
@@ -107,6 +115,7 @@ const netseedf = (() => {
       map.fitBounds(bounds, { padding: [20, 20], maxZoom: 12 });
     }
     setLegend(payload.legend);
+    refreshPopup();
   }
 
   function setDetail(payload) {
@@ -139,6 +148,15 @@ const netseedf = (() => {
     }
   }
 
+  function setGridLines(lines) {
+    gridLines.clearLayers();
+    if (lines && lines.length) {
+      gridLines.addLayer(L.polyline(lines, {
+        renderer: gridRenderer, color: "#222", weight: 0.7, opacity: 0.6, interactive: false,
+      }));
+    }
+  }
+
   function setOpacity(value) {
     opacity = value;
     updateOverview();
@@ -150,6 +168,8 @@ const netseedf = (() => {
   }
 
   function clear() {
+    closePopup();
+    setGridLines(null);
     setData({ kind: "none", legend: null });
   }
 
@@ -178,6 +198,61 @@ const netseedf = (() => {
     info.getContainer().textContent = "";
   });
 
+  // Clicking shows the cell's value in a popup, with a button to export its time series.
+  const popup = L.popup({ maxWidth: 360 });
+
+  function popupContent(p) {
+    const div = L.DomUtil.create("div", "pick");
+    const value = L.DomUtil.create("div", "value", div);
+    value.textContent = `${p.title} = ${p.value}`;
+    L.DomUtil.create("div", "", div).textContent = p.position;
+    if (p.at) {
+      L.DomUtil.create("div", "", div).textContent = p.at;
+    }
+    L.DomUtil.create("div", "cell", div).textContent = p.cell;
+    if (p.export) {
+      const button = L.DomUtil.create("button", "export", div);
+      button.type = "button";
+      button.textContent = p.export;
+      L.DomEvent.on(button, "click", (e) => {
+        L.DomEvent.stop(e);
+        bridge.exportPoint();
+      });
+    }
+    L.DomEvent.disableClickPropagation(div);
+    return div;
+  }
+
+  function pick(latlng) {
+    if (!bridge) {
+      return;
+    }
+    bridge.pick(latlng.lat, latlng.lng, (json) => {
+      const p = JSON.parse(json);
+      if (!p) {
+        closePopup();
+        return;
+      }
+      popup.setLatLng(latlng).setContent(popupContent(p));
+      if (!map.hasLayer(popup)) {
+        popup.openOn(map);
+      }
+    });
+  }
+
+  function closePopup() {
+    map.closePopup(popup);
+  }
+
+  // New data (e.g. another time step): show the value at the same place.
+  function refreshPopup() {
+    if (map.hasLayer(popup)) {
+      pick(popup.getLatLng());
+    }
+  }
+
+  map.on("click", (e) => pick(e.latlng));
+
   // Tell Python what's visible, so it can load that part in more detail.
   map.on("move", updateOverview);
   map.on("moveend", () => {
@@ -195,5 +270,5 @@ const netseedf = (() => {
     bridge.viewChanged(b.getSouth(), b.getWest(), b.getNorth(), b.getEast());
   });
 
-  return { setData, setDetail, setOpacity, setCoastlines, clear };
+  return { setData, setDetail, setGridLines, setOpacity, setCoastlines, closePopup, clear };
 })();

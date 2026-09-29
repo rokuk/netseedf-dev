@@ -12,15 +12,37 @@ from PySide6.QtWebEngineCore import (
     QWebEngineProfile,
     QWebEngineScript,
     QWebEngineSettings,
+    QWebEngineUrlRequestInterceptor,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QVBoxLayout
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QSlider,
+    QVBoxLayout,
+)
 
-from netseedf.core.coords import GridLocator, geo_grid, geo_window, with_cyclic_column
+from netseedf.core.coords import (
+    GridLocator,
+    geo_grid,
+    geo_window,
+    pick_point,
+    with_cyclic_column,
+)
 from netseedf.core.detail import DetailTracker, padded, resolution_note
-from netseedf.core.formatting import format_value, position_text, value_text, variable_label
+from netseedf.core.formatting import (
+    format_value,
+    position_text,
+    selection_text,
+    value_text,
+    variable_label,
+)
+from netseedf.core.gridlines import grid_lines
 from netseedf.core.render import legend_colors, point_colors, render_overlay
-from netseedf.core.slicing import is_finer
+from netseedf.core.slicing import fixed_indices, is_finer, point_series, series_frame, time_dims
 from netseedf.ui.base_view import DataView, wait_cursor
 from netseedf.ui.cartopy_map_view import NO_GEO_MESSAGE
 from netseedf.ui.style_bar import StyleBar
@@ -30,6 +52,8 @@ MAX_SIZE_CURVILINEAR = 800
 MAX_POINTS = 20_000
 COASTLINE_SCALE = "110m"
 DETAIL_DELAY_MS = 150
+MAX_GRID_LINES = 400  # more than this in view and the lines are hidden
+WEB_PROFILE_NAME = "webmap"  # names the on-disk cache and storage folders
 
 
 class _Bridge(QObject):
@@ -47,6 +71,15 @@ class _Bridge(QObject):
     def valueAt(self, lat, lon):  # noqa: N802 (called from JavaScript)
         return self._view.hover_text(lat, lon)
 
+    @Slot(float, float, result=str)
+    def pick(self, lat, lon):
+        return json.dumps(self._view.pick(lat, lon))
+
+    @Slot()
+    def exportPoint(self):  # noqa: N802 (called from JavaScript)
+        # Not from inside the call from the page: the file dialog runs its own event loop.
+        QTimer.singleShot(0, self._view.export_point)
+
     @Slot(float, float, float, float)
     def viewChanged(self, south, west, north, east):  # noqa: N802 (called from JavaScript)
         self._view._view_changed(south, west, north, east)
@@ -60,17 +93,18 @@ class _Page(QWebEnginePage):
 class WebMapView(DataView):
     title = "Web map"
 
-    def __init__(self, state, resources, app_id, homepage, parent=None):
+    def __init__(self, state, resources, user_agent, parent=None):
         super().__init__(state, parent)
         self._resources = resources
-        self._app_id = app_id
-        self._homepage = homepage
+        self._user_agent = user_agent  # identifies the app to tile servers
         self.style_bar = StyleBar()
         self.opacity = QSlider(Qt.Orientation.Horizontal, minimum=0, maximum=100, value=75,
                                maximumWidth=120, toolTip="Opacity of the data layer")
+        self.grid_lines = QCheckBox("Grid lines", toolTip="Outline the cells of the data grid "
+                                    "(when zoomed in far enough to draw them all)")
         self.note = QLabel()
         bar = QHBoxLayout()
-        for w in (self.style_bar, QLabel("Opacity:"), self.opacity):
+        for w in (self.style_bar, QLabel("Opacity:"), self.opacity, self.grid_lines):
             bar.addWidget(w)
         bar.addWidget(self.note, 1)
         self._layout = QVBoxLayout(self.body)
@@ -81,13 +115,16 @@ class WebMapView(DataView):
         self._pending: dict[str, str] = {}
         self._locator = self._detail_locator = None
         self._grid = self._detail = None
+        self._picked = None  # the cell last clicked on, see pick()
         self._view_box = None  # visible (west, east, south, north), from the page
+        self._grid_note = ""  # why grid lines aren't shown, if they aren't
         self._fit = True
         self._tracker = DetailTracker()
         self._detail_timer = QTimer(self, singleShot=True, interval=DETAIL_DELAY_MS)
         self._detail_timer.timeout.connect(self._update_detail)
         self.style_bar.changed.connect(self._redraw)
         self.opacity.valueChanged.connect(lambda v: self._call("setOpacity", v / 100))
+        self.grid_lines.toggled.connect(self._update_grid_lines)
 
     def unavailable_reason(self):
         da = self.state.da
@@ -104,6 +141,8 @@ class WebMapView(DataView):
     def variable_changed(self):
         self._fit = True
         self._locator = self._detail_locator = self._grid = self._detail = None
+        self._picked = None
+        self._call("closePopup")
         self.style_bar.reset_lock()
 
     def _redraw(self):
@@ -131,6 +170,10 @@ class WebMapView(DataView):
                              "min": format_value(vmin, 4), "max": format_value(vmax, 4)}
         self._fit = False
         self._grid, self._locator = grid, GridLocator(grid)
+        self.grid_lines.setEnabled(grid.kind != "points")
+        self.grid_lines.setToolTip("Stations have no grid cells to outline." if grid.kind == "points"
+                                   else "Outline the cells of the data grid "
+                                        "(when zoomed in far enough to draw them all)")
         self._call("setData", payload)
         self._update_note()
         self._detail_timer.start()  # the map may be zoomed in already
@@ -152,7 +195,7 @@ class WebMapView(DataView):
     def _update_note(self):
         if self._grid is not None:
             detail = self._detail.slice if self._detail is not None else None
-            self.note.setText(resolution_note(self._grid.slice, detail))
+            self.note.setText(resolution_note(self._grid.slice, detail) + self._grid_note)
 
     def hover_text(self, lat, lon):
         if self._locator is None:
@@ -164,6 +207,55 @@ class WebMapView(DataView):
             text += f"   {self.state.da.name} = {value_text(self.state.da, found[1])}"
         self.status.emit(text)
         return text
+
+    # --- clicking on a cell --------------------------------------------------
+
+    def pick(self, lat, lon) -> dict | None:
+        """What the popup shows for the cell at lat/lon (None when there's no data)."""
+        self._picked = None
+        if self._grid is None or self.state.da is None:
+            return None
+        da, geo, indices = self.state.da, self.state.geo, self.state.indices
+        try:
+            picked = None
+            if self._detail is not None:
+                picked = pick_point(da, geo, self._detail, lat, lon, indices)
+            picked = picked or pick_point(da, geo, self._grid, lat, lon, indices)
+        except Exception:
+            traceback.print_exc()
+            return None
+        if picked is None:
+            return None
+        self._picked = picked
+        series_dims = time_dims(da, exclude=picked.index)
+        steps = int(np.prod([da.sizes[d] for d in series_dims]))
+        return {
+            "title": str(da.name),
+            "value": value_text(da, picked.value),
+            "position": position_text(picked.lat, picked.lon),
+            "cell": ", ".join(f"{d} #{i}" for d, i in picked.index.items()),
+            "at": selection_text(da, fixed_indices(da, geo.dims, indices)),
+            "export": f"Export time series ({steps} values)…" if series_dims else None,
+        }
+
+    def export_point(self):
+        """Save the values of the clicked cell for every time step as CSV."""
+        picked, da, geo = self._picked, self.state.da, self.state.geo
+        if picked is None or da is None or not time_dims(da, exclude=picked.index):
+            return
+        default = f"{da.name}_lat{picked.lat:.3f}_lon{picked.lon:.3f}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Export time series", default,
+                                              "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            with wait_cursor():
+                series = point_series(da, picked.index, self.state.indices)
+                extra = {str(geo.lat.name): picked.lat, str(geo.lon.name): picked.lon}
+                series_frame(series, extra).to_csv(path)
+        except Exception as e:
+            traceback.print_exc()
+            QMessageBox.warning(self, "Export failed", f"{path}\n\n{type(e).__name__}: {e}")
 
     # --- more detail when zoomed in ------------------------------------------
 
@@ -179,6 +271,7 @@ class WebMapView(DataView):
                 self._load_detail()
         except Exception:  # the overview is still there; don't lose it over the detail
             traceback.print_exc()
+        self._update_grid_lines()
 
     def _load_detail(self):
         visible = self._view_box
@@ -204,6 +297,26 @@ class WebMapView(DataView):
             self._tracker.remember(visible, (x0, x1, y0, y1))
         self._update_note()
 
+    # --- grid lines ---------------------------------------------------------------
+
+    def _update_grid_lines(self):
+        """Draw (or remove) the cell outlines for what's visible."""
+        lines, self._grid_note = None, ""
+        wanted = self.grid_lines.isChecked() and self.grid_lines.isEnabled()
+        if wanted and self._grid is not None and self._view_box is not None:
+            x0, x1, y0, y1 = padded(self._view_box)
+            box = (max(y0, -90), x0, min(y1, 90), x1)
+            try:
+                lines = grid_lines(self.state.da, self.state.geo, self._grid, self.state.indices,
+                                   box, MAX_GRID_LINES)
+            except Exception:
+                traceback.print_exc()
+                lines = []
+            if lines is None:
+                self._grid_note = "  zoom in to see grid lines"
+        self._call("setGridLines", lines)
+        self._update_note()
+
     # --- talking to the page ---------------------------------------------
 
     def _call(self, function, *args):
@@ -226,10 +339,7 @@ class WebMapView(DataView):
     def _ensure_web(self):
         if self.web is not None:
             return
-        profile = QWebEngineProfile.defaultProfile()
-        # Tile servers (OpenStreetMap's usage policy) want to know which app is asking.
-        profile.setHttpUserAgent(f"{profile.httpUserAgent()} {self._app_id} (+{self._homepage})")
-
+        profile = _profile(self, self._user_agent)
         self.web = QWebEngineView()
         page = _Page(profile, self.web)
         page.settings().setAttribute(
@@ -242,6 +352,42 @@ class WebMapView(DataView):
         self.web.setPage(page)
         self.web.setUrl(QUrl.fromLocalFile(self._resources("web", "map.html")))
         self._layout.addWidget(self.web, 1)
+
+
+class _TileInterceptor(QWebEngineUrlRequestInterceptor):
+    """Identifies the app to tile servers that ask for it."""
+
+    # OpenStreetMap's tile usage policy wants a User-Agent naming the app, not a browser's.
+    APP_ONLY_HOSTS = {"tile.openstreetmap.org"}
+
+    def __init__(self, user_agent, parent=None):
+        super().__init__(parent)
+        self._user_agent = user_agent.encode()
+
+    def interceptRequest(self, info):  # noqa: N802 (Qt override)
+        if info.requestUrl().host() in self.APP_ONLY_HOSTS:
+            info.setHttpHeader(b"User-Agent", self._user_agent)
+
+
+def _profile(parent, user_agent) -> QWebEngineProfile:
+    """Web profile that keeps downloaded tiles on disk between runs.
+
+    Tile servers ask clients to honour their caching headers (OpenStreetMap's
+    tiles stay fresh for about a week), which Qt's default, in-memory-only
+    profile can't do across restarts. The cache lives in the per-user cache
+    folder (from the application and organization names), never next to the
+    program, so it also works when the app is frozen and installed read-only.
+    """
+    profile = QWebEngineProfile(WEB_PROFILE_NAME, parent)
+    profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+    profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
+    # Other tile servers get the browser's User-Agent with the app appended.
+    profile.setHttpUserAgent(f"{profile.httpUserAgent()} {user_agent}")
+    # Kept referenced from Python: a Qt parent alone keeps the C++ object, but
+    # not the Python subclass whose interceptRequest does the work.
+    profile.interceptor = _TileInterceptor(user_agent, profile)
+    profile.setUrlRequestInterceptor(profile.interceptor)
+    return profile
 
 
 def _qwebchannel_script():

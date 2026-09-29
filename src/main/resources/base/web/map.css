@@ -38,3 +38,21 @@ html, body, #map {
   display: flex;
   justify-content: space-between;
 }
+
+.pick {
+  font: 12px/1.5 system-ui, sans-serif;
+}
+
+.pick .value {
+  font-weight: 600;
+}
+
+.pick .cell {
+  color: #777;
+}
+
+.pick .export {
+  margin-top: 6px;
+  font: inherit;
+  cursor: pointer;
+}

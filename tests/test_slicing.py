@@ -2,7 +2,15 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from netseedf.core.slicing import coord_values, extract, fixed_indices
+from netseedf.core.slicing import (
+    coord_values,
+    extract,
+    fixed_indices,
+    is_time_dim,
+    point_series,
+    series_frame,
+    time_dims,
+)
 
 
 @pytest.fixture
@@ -47,3 +55,32 @@ def test_coord_values(salinity):
 def test_coord_values_missing_for_plain_dimension(samples):
     with xr.open_dataset(samples["curvilinear.nc"]) as ds:
         assert coord_values(ds["temp"], "x") is None
+
+
+def test_time_dims(samples):
+    with xr.open_dataset(samples["four_d.nc"]) as ds:
+        assert time_dims(ds["salinity"]) == ("time",)
+        assert time_dims(ds["salinity"], exclude={"time": 0}) == ()
+    with xr.open_dataset(samples["wrf_like.nc"]) as ds:  # "Time" has no coordinate
+        assert time_dims(ds["T2"]) == ("Time",)
+    with xr.open_dataset(samples["netcdf3.nc"], decode_times=False) as ds:  # units "days since"
+        assert time_dims(ds["pr"]) == ("time",)
+    with xr.open_dataset(samples["regular_global.nc"]) as ds:
+        assert not is_time_dim(ds["sst"], "lat")
+
+
+def test_point_series_keeps_other_dims_fixed(salinity):
+    series = point_series(salinity, {"lat": 4, "lon": 7}, {"time": 2, "depth": 3})
+    assert series.dims == ("time",)
+    np.testing.assert_array_equal(series.values, salinity.isel(depth=3, lat=4, lon=7).values)
+
+
+def test_series_frame(salinity):
+    series = point_series(salinity, {"lat": 4, "lon": 7}, {"depth": 1})
+    frame = series_frame(series, {"lat": 99.0, "station": "A"})
+    assert frame.index.name == "time"
+    assert len(frame) == salinity.sizes["time"]
+    assert frame.columns[0] == "station"  # extra columns come first...
+    assert (frame["lat"] == float(salinity.lat[4])).all()  # ...unless they're coordinates already
+    assert (frame["depth"] == float(salinity.depth[1])).all()
+    np.testing.assert_array_equal(frame["salinity"], series.values)

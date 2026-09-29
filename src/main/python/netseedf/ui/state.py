@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal
 
 from netseedf.core.coords import GeoInfo, find_geo
 from netseedf.core.dataset import OpenedFile, VariableRef
+from netseedf.core.slicing import is_time_dim
 
 
 class SelectionState(QObject):
@@ -31,8 +32,11 @@ class SelectionState(QObject):
         except Exception:  # an odd coordinate shouldn't stop the other views
             traceback.print_exc()
             self.geo = None
-        # self.indices is kept, so e.g. the time step survives switching variables
-        # (it's clamped to each variable's size where it's used).
+        # Every variable starts at its first time step. Other indices are kept,
+        # e.g. the depth level (they're clamped to each variable's size where used).
+        for dim in self.da.dims:
+            if is_time_dim(self.da, dim):
+                self.indices[dim] = 0
         self.variableChanged.emit()
 
     def clear(self):
@@ -45,3 +49,4 @@ class SelectionState(QObject):
         if changes:
             self.indices.update(changes)
             self.indicesChanged.emit()
+

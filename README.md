@@ -15,7 +15,7 @@ station data (lat/lon along one dimension) can all be mapped.
 
 ## Development
 
-Needs [uv](https://docs.astral.sh/uv/).
+Needs [uv](https://docs.astral.sh/uv/) and Python 3.13.
 
 ```sh
 uv sync                                   # create .venv with all dependencies
@@ -46,10 +46,7 @@ to start, `fbs freeze --debug` shows the missing module; add it to `hidden_impor
 
 Notes:
 
-- The project targets Python 3.14. If your fbs Pro version doesn't support 3.14 yet, recreate
-  the venv with 3.13 (`uv venv --python 3.13 && uv sync`) and lower `requires-python`.
-- QtWebEngine (for the web map) accounts for most of the size: the frozen app is about 850 MB
-  on disk, the installer about 240 MB.
+- The project targets Python 3.13 (`uv venv --python 3.13 && uv sync`).
 - On macOS, the build is for the Mac's own architecture (Apple Silicon or Intel). fbs doesn't
   sign or notarize; do that with `codesign` / `notarytool` before distributing.
 - `src/freeze/mac/Contents/Info.plist` registers the app for `.nc`, `.nc4`, `.cdf` and `.netcdf`
