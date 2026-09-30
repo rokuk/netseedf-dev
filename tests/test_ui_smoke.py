@@ -48,7 +48,8 @@ def _errors(w):
 
 @pytest.mark.parametrize("name", ["regular_global.nc", "curvilinear.nc", "timeseries.nc", "four_d.nc",
                                   "groups.nc", "netcdf3.nc", "packed.nc", "noleap.nc", "bad_time.nc",
-                                  "points.nc", "pacific.nc", "wrf_like.nc"])
+                                  "points.nc", "pacific.nc", "wrf_like.nc", "bounded.nc",
+                                  "trajectories.nc"])
 def test_every_variable_in_every_tab(window, samples, name):
     window.open_path(samples[name])
     file_id = window.tree.current_file_id()
@@ -60,6 +61,24 @@ def test_every_variable_in_every_tab(window, samples, name):
             for dim in da.dims:  # jump to the last index of every dim
                 window.state.set_indices({dim: da.sizes[dim] - 1})
             assert _errors(window) == {}, f"{item.text(0)} in tab {tab}"
+
+
+def test_info_tab_shows_tables(window, samples):
+    window.open_path(samples["packed.nc"])
+    info = window.info
+    assert info.heading.text().count("packed.nc") == 1
+    assert "t2m" in info.subheading.text()
+    rows = {info.attributes.table.item(r, 0).text(): info.attributes.table.item(r, 1).text()
+            for r in range(info.attributes.table.rowCount())}
+    assert rows["scale_factor"] == "0.01"  # not in da.attrs after decoding, but in the file
+    assert info.dimensions.isHidden() and info.variables.isHidden()
+
+    window.tree.setCurrentItem(window.tree.file_item(window.tree.current_file_id()))
+    assert "packed.nc" in info.heading.text()
+    assert not info.dimensions.isHidden() and not info.variables.isHidden()
+    variables = [info.variables.table.item(r, 0).text() for r in range(info.variables.table.rowCount())]
+    assert "t2m" in variables
+    assert info.dimensions.table.rowCount() == 2
 
 
 def test_maps_are_available_only_with_coordinates(window, samples):
@@ -352,3 +371,197 @@ def test_web_map_grid_lines(window, samples, monkeypatch):
     assert view._pending["setGridLines"] == "netseedf.setGridLines(null);"
     assert "grid lines" not in view.note.text()
 
+
+
+@pytest.mark.parametrize(("name", "units", "attrs", "down"), [
+    ("depth", "m", {"positive": "down"}, True),
+    ("plev", "hPa", {}, True),  # pressure is down without `positive`
+    ("height", "m", {"positive": "up"}, False),
+])
+def test_vertical_axis_follows_cf_direction(window, tmp_path, name, units, attrs, down):
+    """CF 4.3: `positive` (or pressure units) says which way a vertical coordinate increases."""
+    import netCDF4
+
+    path = tmp_path / "vertical.nc"
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.createDimension(name, 3)
+        nc.createDimension("lat", 4)
+        z = nc.createVariable(name, "f8", (name,))
+        z.setncatts({"units": units, **attrs})
+        z[:] = [10, 500, 1000]
+        lat = nc.createVariable("lat", "f8", ("lat",))
+        lat.units = "degrees_north"
+        lat[:] = [0, 10, 20, 30]
+        nc.createVariable("v", "f4", (name, "lat"))[:] = np.arange(12).reshape(3, 4)
+    window.open_path(path)
+    window.tabs.setCurrentWidget(window.plot)
+    assert window.plot.y.currentText() == name
+    assert window.plot._ax.yaxis_inverted() == down
+
+
+@pytest.mark.filterwarnings("error:The input coordinates to pcolormesh:UserWarning")
+@pytest.mark.parametrize("projection", ["Equal Earth", "Plate Carrée"])
+def test_map_of_swath_with_missing_positions(window, tmp_path, projection):
+    """Missing lat/lon (CF 2.5.1) mustn't make the mesh's cell edges go wrong (matplotlib warns)."""
+    import netCDF4
+
+    path = tmp_path / "swath.nc"
+    j, i = np.mgrid[0:30, 0:40]
+    lat, lon = 40 + 0.5 * j + 0.05 * i, 5 + 0.5 * i - 0.05 * j
+    lat[:, 32:] = lon[:, 32:] = lat[:4, :10] = lon[:4, :10] = -999  # e.g. beyond the limb
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.createDimension("y", 30)
+        nc.createDimension("x", 40)
+        for name, values, units in (("lat", lat, "degrees_north"), ("lon", lon, "degrees_east")):
+            v = nc.createVariable(name, "f8", ("y", "x"), fill_value=-999.0)
+            v.units = units
+            v[:] = values
+        v = nc.createVariable("radiance", "f4", ("y", "x"))
+        v.coordinates = "lat lon"
+        v[:] = np.arange(1200).reshape(30, 40)
+    window.open_path(path)
+    window.tabs.setCurrentWidget(window.map)
+    window.map.projection.setCurrentText(projection)
+    assert window.state.geo.kind == "curvilinear"
+    assert _errors(window) == {}
+    window.map.mpl.canvas.draw()
+
+
+TESTFILES = Path(__file__).parent / "testfiles"
+REAL_FILES = sorted(p.name for p in TESTFILES.glob("*.nc")) if TESTFILES.is_dir() else []
+
+
+@pytest.mark.skipif(not REAL_FILES, reason="tests/testfiles isn't there")
+@pytest.mark.parametrize("name", REAL_FILES)
+def test_real_files_in_every_tab(window, name):
+    """Every variable of the (large, not in git) files in tests/testfiles, in every tab."""
+    window.open_path(TESTFILES / name)
+    file_id = window.tree.current_file_id()
+    for item in window.tree.variable_items(file_id):
+        window.tree.setCurrentItem(item)
+        for tab in range(window.tabs.count() - 1):  # all but the web map
+            window.tabs.setCurrentIndex(tab)
+            assert _errors(window) == {}, f"{item.text(0)} in tab {tab}"
+
+
+@pytest.mark.parametrize("n_points", [2, 3])  # 2: an index array that unpacks like (start, stop)
+def test_web_map_zoom_on_stations_shown_in_full(window, samples, n_points):
+    """Stations all on the map already: zooming in needs no detail, and mustn't fail."""
+    view = _show_on_web_map(window, samples, "points.nc")
+    view._max_size = web_map_view.MAX_POINTS
+    view._grid = geo_grid(window.state.da, window.state.geo, window.state.indices, view._max_size)
+    assert not view._grid.slice.downsampled
+    lat, lon = window.state.dataset["lat"].values, window.state.dataset["lon"].values
+    order = np.argsort(lon)
+    near = order[:n_points]
+    view._view_box = (float(lon[near].min()) - 0.01, float(lon[near].max()) + 0.01,
+                      float(lat[near].min()) - 0.01, float(lat[near].max()) + 0.01)
+    view._load_detail()  # raises, unlike _update_detail, which only prints the error
+    assert view._detail is None
+
+
+def _map_pixels(view):
+    view.mpl.canvas.draw()
+    return np.asarray(view.mpl.canvas.buffer_rgba()).copy()
+
+
+@pytest.mark.parametrize("projection", ["Equal Earth", "Plate Carrée"])
+def test_map_time_step_updates_in_place(window, samples, projection):
+    """Another time step only swaps the values: the map looks exactly as if drawn anew."""
+    window.open_path(samples["regular_global.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view = window.map
+    view.projection.setCurrentText(projection)
+    ax, colorbar = view._ax, view._colorbar
+    window.state.set_indices({"time": 2})
+    assert view._ax is ax and view._colorbar is colorbar  # nothing was rebuilt
+    sst = window.state.da.isel(time=2).values
+    assert colorbar.norm.vmin == pytest.approx(np.nanmin(sst))  # the automatic range follows
+    assert "2024-01-03" in view._title.get_text()
+    in_place = _map_pixels(view)
+    view._layout = None  # draw it anew
+    view.update_view()
+    assert view._ax is not ax
+    np.testing.assert_array_equal(in_place, _map_pixels(view))
+
+
+def test_map_time_step_reloads_zoomed_detail(window, samples, monkeypatch):
+    import cartopy.crs as ccrs
+
+    from netseedf.ui import cartopy_map_view
+    monkeypatch.setattr(cartopy_map_view, "MAX_SIZE_MESH", 30)
+    window.open_path(samples["regular_global.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view = window.map
+    view._ax.set_extent((0, 30, 40, 60), crs=ccrs.PlateCarree())
+    view._update_detail()
+    assert view._detail is not None
+    window.state.set_indices({"time": 3})
+    assert view._detail is not None and view._detail.slice.fixed == {"time": 3}
+    x, y = view._ax.projection.transform_point(10, 45, ccrs.PlateCarree())
+    expected = float(window.state.da.isel(time=3).sel(lat=45, lon=10))
+    assert f"sst = {expected:.6g} K" in view._ax.format_coord(x, y)
+
+
+def test_map_time_step_redraws_stations(window, samples):
+    """Which stations have no value changes with time, so the points are drawn again."""
+    window.open_path(samples["points.nc"])
+    _select(window, "precip")
+    window.tabs.setCurrentWidget(window.map)
+    view = window.map
+    ax, points = view._ax, view._artist
+    window.state.set_indices({"time": 3})
+    assert view._ax is ax and view._artist is not points
+    assert view._colorbar.mappable is view._artist
+    precip = window.state.da.isel(time=3).values
+    np.testing.assert_array_equal(np.sort(view._artist.get_array()), np.sort(precip[np.isfinite(precip)]))
+
+
+def test_map_drawn_anew_when_positions_move(window, samples):
+    """Another trajectory (or WRF's XLAT at another time) puts the cells elsewhere."""
+    window.open_path(samples["trajectories.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view = window.map
+    ax = view._ax
+    window.state.set_indices({"trajectory": 1})
+    assert view._ax is not ax
+
+
+def test_gridlines_placed_once_per_view(window, samples, monkeypatch):
+    """Cartopy would place gridlines and labels on every draw; only a new view needs them."""
+    import cartopy.crs as ccrs
+    from cartopy.mpl.gridliner import Gridliner
+
+    from netseedf.ui.cartopy_map_view import ViewGridliner
+    placed = []
+    original = Gridliner._draw_gridliner
+    monkeypatch.setattr(Gridliner, "_draw_gridliner",
+                        lambda self, *a, **k: (placed.append(1), original(self, *a, **k))[1])
+    window.open_path(samples["regular_global.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view = window.map
+    view.mpl.canvas.draw()
+    gridliner = next(a for a in view._ax.artists if isinstance(a, ViewGridliner))
+    assert gridliner.label_artists and gridliner.xline_artists
+    assert all(lines.get_transform() == view._ax.transData  # projected once, not on every draw
+               for lines in gridliner.xline_artists + gridliner.yline_artists)
+    placed.clear()
+    for t in (1, 2, 3):
+        window.state.set_indices({"time": t})
+        view.mpl.canvas.draw()
+    assert placed == []
+    view._ax.set_extent((0, 30, 40, 60), crs=ccrs.PlateCarree())
+    view.mpl.canvas.draw()
+    assert len(placed) == 1
+    labels = {label.get_text() for label in gridliner.label_artists if label.get_visible()}
+    assert "10°E" in labels and "50°N" in labels  # labels of the zoomed-in view
+
+
+def test_web_map_outlines_for_the_none_basemap():
+    """The offline "None" basemap: coastlines and borders from the bundled Natural Earth files."""
+    outlines = web_map_view.outlines_geojson(resource)
+    assert set(outlines) == {"coastlines", "borders"}
+    for name, collection in outlines.items():
+        assert collection is not None, name
+        assert collection["type"] == "FeatureCollection" and len(collection["features"]) > 100, name
+        assert collection["features"][0]["geometry"]["type"] in ("LineString", "MultiLineString"), name

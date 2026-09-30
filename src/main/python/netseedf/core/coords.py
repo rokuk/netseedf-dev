@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import xarray as xr
 
+from netseedf.core.cf import is_discrete_sampling
 from netseedf.core.slicing import Slice, as_float, extract, load_selection
 
 LAT_NAMES = {"lat", "latitude", "nav_lat", "xlat", "xlat_m", "lat_rho", "gphit", "y_lat", "lats"}
@@ -25,10 +26,22 @@ class GeoInfo:
     lat: xr.DataArray
     lon: xr.DataArray
     dims: tuple[str, ...]  # data dims spanned by the grid: (y, x), or (point,)
+    # Cell boundaries (CF 7.1): (n, 2) for regular grids, (ny, nx, 4) for curvilinear ones
+    lat_bounds: xr.DataArray | None = None
+    lon_bounds: xr.DataArray | None = None
     cache: dict = field(default_factory=dict, repr=False)  # full point coordinates, see point_window
 
 
 def find_geo(da: xr.DataArray, ds: xr.Dataset | None = None) -> GeoInfo | None:
+    geo = _find_geo(da, ds)
+    if geo is None or geo.kind == "points":
+        return geo
+    nv = 2 if geo.kind == "regular" else 4
+    return GeoInfo(geo.kind, geo.lat, geo.lon, geo.dims,
+                   _bounds(geo.lat, da, ds, nv), _bounds(geo.lon, da, ds, nv))
+
+
+def _find_geo(da, ds):
     lats, lons = [], []
     for name, var in _candidates(da, ds).items():
         role = _role(name, var)
@@ -41,7 +54,9 @@ def find_geo(da: xr.DataArray, ds: xr.Dataset | None = None) -> GeoInfo | None:
         for lon in lons:
             if lat.ndim == lon.ndim == 1 and lat.dims != lon.dims and {*lat.dims, *lon.dims} <= dims:
                 return GeoInfo("regular", lat, lon, (lat.dims[0], lon.dims[0]))
-    for lat in lats:  # 2D (or more, e.g. WRF's XLAT(Time, y, x)) sharing the last two dims
+    # Features (CF 9) aren't grids, even with 2D positions, e.g. lat(trajectory, obs).
+    features = is_discrete_sampling(ds)
+    for lat in [] if features else lats:  # 2D (or more, e.g. WRF's XLAT(Time, y, x)), same last 2 dims
         for lon in lons:
             if lat.ndim >= 2 and lon.ndim >= 2 and lat.dims[-2:] == lon.dims[-2:]:
                 if set(lat.dims) <= dims and set(lon.dims) <= dims:
@@ -50,7 +65,27 @@ def find_geo(da: xr.DataArray, ds: xr.Dataset | None = None) -> GeoInfo | None:
         for lon in lons:
             if lat.ndim == lon.ndim == 1 and lat.dims == lon.dims and lat.dims[0] in dims:
                 return GeoInfo("points", lat, lon, lat.dims)
+            # Features: points along the sample dim (last, 9.3), one feature at a time.
+            if features and lat.ndim >= 2 and lat.dims == lon.dims and set(lat.dims) <= dims:
+                return GeoInfo("points", lat, lon, lat.dims[-1:])
     return None
+
+
+def _bounds(coord, da, ds, nv):
+    """The coordinate's boundary variable (CF 7.1), if it has a usable one."""
+    name = coord.attrs.get("bounds") or coord.encoding.get("bounds")
+    if not name:
+        return None
+    if name in da.coords:
+        bounds = da.coords[name]
+    elif ds is not None and name in ds.variables:
+        bounds = ds[name]
+    else:
+        return None
+    if bounds.ndim != coord.ndim + 1 or bounds.dims[:-1] != coord.dims or bounds.shape[-1] != nv \
+            or bounds.dtype.kind not in "fiu":
+        return None
+    return bounds
 
 
 def _candidates(da, ds):
@@ -59,7 +94,7 @@ def _candidates(da, ds):
         for name, var in ds.variables.items():
             if name != da.name and str(name) not in found and var.ndim >= 1 \
                     and set(var.dims) <= set(da.dims):
-                found[str(name)] = var
+                found[str(name)] = ds[name]  # a DataArray, like the coordinates
     return {name: var for name, var in found.items() if var.dtype.kind in "fiu"}
 
 
@@ -104,6 +139,10 @@ class GeoGrid:
     # full-resolution cells, so a thinned-out grid lines up with the real one.
     lat_edges: np.ndarray | None = None
     lon_edges: np.ndarray | None = None
+    # Curvilinear grids at full resolution with cell bounds: (lat, lon) of the cell
+    # corners, each (ny + 1, nx + 1), longitudes without jumps.
+    corners: tuple[np.ndarray, np.ndarray] | None = None
+    from_bounds: bool = False  # the cell edges/corners come from bounds (CF 7.1)
 
     @property
     def bounds(self):
@@ -128,18 +167,153 @@ def geo_grid(da: xr.DataArray, geo: GeoInfo, indices, max_size=None, window=None
     values = as_float(sl.values)
     if values is None:
         raise ValueError(f"'{da.name}' isn't numeric ({da.dtype}), so it can't be drawn on a map.")
-    lat = _coord_slice(geo.lat, sl)
-    lon, lon_0_360 = normalize_lon(_coord_slice(geo.lon, sl), like.lon_0_360 if like else None)
+    lat, lon = _positions(geo, sl)
+    lon, lon_0_360 = normalize_lon(lon, like.lon_0_360 if like else None)
     index = tuple(sl.index(axis) for axis in range(len(sl.dims)))
     if geo.kind == "regular":
         rows, cols = np.argsort(lat, kind="stable"), np.argsort(lon, kind="stable")
         lat, lon, values = lat[rows], lon[cols], values[np.ix_(rows, cols)]
         index = (index[0][rows], index[1][cols])
-        full_lon = normalize_lon(np.asarray(geo.lon.values, dtype=float), lon_0_360)[0]
+        (full_lat, lat_edges), (full_lon, lon_edges) = regular_edges(geo, lon_0_360)
         return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360,
-                       block_edges(np.asarray(geo.lat.values, dtype=float), lat),
-                       block_edges(full_lon, lon))
-    return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360)
+                       block_edges(full_lat, lat, lat_edges), block_edges(full_lon, lon, lon_edges),
+                       from_bounds=_moved(full_lat, lat_edges) or _moved(full_lon, lon_edges))
+    corners = None
+    if geo.kind == "curvilinear" and geo.lat_bounds is not None and geo.lon_bounds is not None \
+            and not sl.downsampled:
+        from netseedf.core.gridlines import unwrap_lon  # (gridlines needs this module)
+
+        unwrapped = unwrap_lon(lon)
+        raw_lon = _coord_slice(geo.lon, sl)
+        # Each vertex within 180 degrees of its cell's centre, like the unwrapped centres
+        lon_b = unwrapped[..., None] + lon_diff(_bounds_slice(geo.lon_bounds, sl), raw_lon[..., None])
+        corners = vertex_corners(lat, unwrapped, _bounds_slice(geo.lat_bounds, sl), lon_b)
+    return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360,
+                   corners=corners, from_bounds=corners is not None)
+
+
+def regular_edges(geo: GeoInfo, lon_0_360):
+    """((lat, lat edges), (lon, lon edges)) of a regular grid at full resolution, sorted.
+
+    Edges come from the cell bounds when there are any (and they're contiguous),
+    else they're halfway between the centres.
+    """
+    lat = np.asarray(geo.lat.values, dtype=float)
+    raw_lon = np.asarray(geo.lon.values, dtype=float)
+    lon = normalize_lon(raw_lon, lon_0_360)[0]
+    lat_b = None if geo.lat_bounds is None else np.asarray(geo.lat_bounds.values, dtype=float)
+    lon_b = None if geo.lon_bounds is None else np.asarray(geo.lon_bounds.values, dtype=float)
+    if lon_b is not None:  # shifted by 360 degrees along with their centres
+        lon_b = lon_b + (lon - raw_lon)[:, None]
+    return axis_edges(lat, lat_b), axis_edges(lon, lon_b)
+
+
+def cells_from_bounds(geo: GeoInfo) -> bool:
+    """Do the grid's bounds put its cells anywhere but around (and halfway between) the centres?"""
+    if geo.kind == "curvilinear":
+        return geo.lat_bounds is not None and geo.lon_bounds is not None
+    if geo.kind != "regular":
+        return False
+    (lat, lat_edges), (lon, lon_edges) = regular_edges(geo, None)
+    return _moved(lat, lat_edges) or _moved(lon, lon_edges)
+
+
+def _moved(centres, edges):
+    return not np.allclose(edges, cell_edges(centres), rtol=0, atol=1e-6)
+
+
+def axis_edges(centres, bounds=None, tolerance=1e-4):
+    """Sorted centres and the (n + 1) edges of their cells, from bounds (n, 2) if possible."""
+    order = np.argsort(centres, kind="stable")
+    centres = centres[order]
+    if bounds is not None:
+        b = np.sort(bounds[order], axis=1)
+        if np.isfinite(b).all() and np.allclose(b[1:, 0], b[:-1, 1], rtol=0, atol=tolerance):
+            return centres, np.append(b[:, 0], b[-1, 1])
+    return centres, cell_edges(centres)
+
+
+def _bounds_slice(bounds: xr.DataArray, sl: Slice) -> np.ndarray:
+    """Bounds of the cells in a slice: (..., number of vertices)."""
+    vertex = bounds.dims[-1]
+    return np.stack([_coord_slice(bounds.isel({vertex: k}), sl) for k in range(bounds.sizes[vertex])],
+                    axis=-1)
+
+
+def vertex_corners(lat, lon, lat_b, lon_b, tolerance=1e-4):
+    """Corners (ny + 1, nx + 1) shared by neighbouring cells, from each cell's 4 vertices.
+
+    The vertices can come in any order (CF only asks for anticlockwise), so
+    each corner is matched to the nearest vertex. None if neighbouring cells
+    don't agree on the corners they share, or the grid is too small.
+    """
+    from netseedf.core.gridlines import cell_corners  # (gridlines needs this module)
+
+    ny, nx = lat.shape
+    if ny < 2 or nx < 2:
+        return None
+    guess_lat, guess_lon = cell_corners(lat), cell_corners(lon)
+    corner_lat, corner_lon = np.full((ny + 1, nx + 1), np.nan), np.full((ny + 1, nx + 1), np.nan)
+    j, i = np.ogrid[0:ny, 0:nx]
+    for dj, di in ((0, 0), (0, 1), (1, 1), (1, 0)):
+        g_lat, g_lon = guess_lat[dj:dj + ny, di:di + nx], guess_lon[dj:dj + ny, di:di + nx]
+        d2 = (lat_b - g_lat[..., None]) ** 2 + (lon_b - g_lon[..., None]) ** 2
+        k = np.argmin(np.where(np.isfinite(d2), d2, np.inf), axis=-1)
+        for corner, b in ((corner_lat, lat_b), (corner_lon, lon_b)):
+            v = b[j, i, k]
+            sub = corner[dj:dj + ny, di:di + nx]
+            both = np.isfinite(sub) & np.isfinite(v)
+            if not np.allclose(sub[both], v[both], rtol=0, atol=tolerance):
+                return None
+            unset = ~np.isfinite(sub)
+            sub[unset] = v[unset]
+    return corner_lat, corner_lon
+
+
+def fill_missing_positions(lat, lon, values):
+    """A curvilinear grid's (lat, lon, values), ready for a mesh, which can't have missing positions.
+
+    Missing positions (CF 2.5.1) continue the grid around them, linearly, so the
+    cells next to them keep their size (and a mesh its shape). Their values
+    become missing, so they aren't drawn.
+    """
+    missing = ~(np.isfinite(lat) & np.isfinite(lon))
+    if not missing.any() or missing.all():
+        return lat, lon, np.where(missing, np.nan, values)
+    # Longitudes relative to a typical one, so they're continued without jumps of 360°.
+    ref = float(np.median(lon[~missing]))
+    lat_c = np.clip(continue_grid(np.where(missing, np.nan, lat)), -90, 90)
+    lon_c = ref + continue_grid(np.where(missing, np.nan, lon_diff(lon, ref)))
+    return (np.where(missing, lat_c, lat), np.where(missing, lon_c, lon),
+            np.where(missing, np.nan, values))
+
+
+def continue_grid(a):
+    """A 2D array with its NaNs continued linearly from the valid values.
+
+    Along the rows first (inside gaps: interpolated, at the ends: extrapolated,
+    from one value: repeated), then the same along the columns for rows with none.
+    """
+    return _continue_rows(_continue_rows(a).T).T
+
+
+def _continue_rows(a):
+    a = np.array(a, dtype=float)
+    x = np.arange(a.shape[1], dtype=float)
+    for row in a:
+        ok = np.isfinite(row)
+        if ok.all() or not ok.any():
+            continue
+        xs, ys = x[ok], row[ok]
+        if xs.size == 1:
+            row[~ok] = ys[0]
+            continue
+        filled = np.interp(x, xs, ys)
+        before, after = x < xs[0], x > xs[-1]
+        filled[before] = ys[0] + (x[before] - xs[0]) * (ys[1] - ys[0]) / (xs[1] - xs[0])
+        filled[after] = ys[-1] + (x[after] - xs[-1]) * (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
+        row[~ok] = filled[~ok]
+    return a
 
 
 def cell_edges(centres):
@@ -151,17 +325,18 @@ def cell_edges(centres):
     return np.concatenate([[c[0] - (mid[0] - c[0])], mid, [c[-1] + (c[-1] - mid[-1])]])
 
 
-def block_edges(full, centres):
+def block_edges(full, centres, edges=None):
     """Edges of the cells drawn at `centres`, some (sorted) values of the coordinate `full`.
 
     When the grid is thinned out, each drawn cell stands for the real cells
     halfway to its neighbours (at the ends: all the way to where the next one
     would be, so the skipped cells there are covered too). Its edges are real
     cell edges, not midpoints between the drawn centres, so it lines up with
-    the full-resolution grid.
+    the full-resolution grid. `edges` are those of the full-resolution cells
+    (by default halfway between the sorted `full` values).
     """
     full = np.sort(full)
-    edges = cell_edges(full)
+    edges = cell_edges(full) if edges is None else edges
     pos = np.clip(np.searchsorted(full, centres), 0, full.size - 1)
     if pos.size == 1:
         return edges[[pos[0], pos[0] + 1]]
@@ -189,7 +364,22 @@ def with_cyclic_column(grid: GeoGrid) -> GeoGrid:
     if lon_edges is not None:  # the last column now reaches the repeated first one
         lon_edges = np.concatenate([lon_edges[:-1], lon_edges[:2] + 360])
     return GeoGrid(grid.kind, grid.lat, lon, values, grid.slice, index, grid.lon_0_360,
-                   grid.lat_edges, lon_edges)
+                   grid.lat_edges, lon_edges, from_bounds=grid.from_bounds)
+
+
+def _positions(geo: GeoInfo, sl: Slice) -> tuple[np.ndarray, np.ndarray]:
+    """Latitudes and longitudes of a slice. Positions off the globe count as missing.
+
+    Auxiliary coordinates may have missing values (CF 2.5.1), and not every file
+    marks them: e.g. undefined satellite pixels holding garbage like 2e9.
+    """
+    lat, lon = _coord_slice(geo.lat, sl), _coord_slice(geo.lon, sl)
+    if geo.kind != "regular":  # coordinate variables can't have missing values
+        with np.errstate(invalid="ignore"):
+            off = ~((np.abs(lat) <= 90) & (np.abs(lon) <= 720))
+        if off.any():
+            lat, lon = np.where(off, np.nan, lat), np.where(off, np.nan, lon)
+    return lat, lon
 
 
 def _coord_slice(var: xr.DataArray, sl: Slice) -> np.ndarray:
@@ -228,7 +418,20 @@ def geo_window(geo: GeoInfo, grid: GeoGrid, box) -> dict | None:
                               grid.slice.steps, strict=True):
         # One coarse step extra: cells cut by the edge, and ones the stride skipped.
         window[dim] = (int(idx.min()) - step, int(idx.max()) + step + 1)
+        if grid.kind == "regular":
+            # In view may be both ends of the stored longitudes (e.g. of 0..360 around 0°),
+            # which a (start, stop) range could only span with everything in between.
+            window[dim] = _index_window(idx, step, geo.lat.size if dim == geo.dims[0] else geo.lon.size)
     return window
+
+
+def _index_window(idx, step, n):
+    """(start, stop) of the full-resolution indices within `step` of `idx`, or all of
+    them (an array) when they're in more than one run."""
+    near = np.unique(np.clip((idx[:, None] + np.arange(-step, step + 1)).ravel(), 0, n - 1))
+    if near[-1] - near[0] + 1 == near.size:
+        return int(near[0]), int(near[-1]) + 1
+    return near
 
 
 def point_window(geo: GeoInfo, grid: GeoGrid, box) -> dict | None:
@@ -239,8 +442,8 @@ def point_window(geo: GeoInfo, grid: GeoGrid, box) -> dict | None:
         dim = sl.dims[0]
         full = Slice(np.empty(0), sl.dims, (1,), sl.fixed, (slice(0, geo.lat.sizes[dim], 1),))
         geo.cache.clear()  # keep only the current time step's coordinates
-        geo.cache[key] = (_coord_slice(geo.lat, full),
-                          normalize_lon(_coord_slice(geo.lon, full), grid.lon_0_360)[0])
+        lat, lon = _positions(geo, full)
+        geo.cache[key] = (lat, normalize_lon(lon, grid.lon_0_360)[0])
     lat, lon = geo.cache[key]
     idx = np.flatnonzero(in_box(lat, lon, box))
     return {sl.dims[0]: idx} if idx.size else None
@@ -285,8 +488,13 @@ class GridLocator:
         if not (np.isfinite(lat) and np.isfinite(lon)):
             return None
         if g.kind == "regular":
-            i = _nearest_1d(g.lat, lat)
-            j = _nearest_1d(g.lon, lon, wrap=True)
+            if g.lat_edges is not None and g.lon_edges is not None:  # the cell holding the position
+                i = _in_cell(g.lat_edges, lat)
+                j = next((j for k in (0, -360, 360) if (j := _in_cell(g.lon_edges, lon + k)) is not None),
+                         None)
+            else:
+                i = _nearest_1d(g.lat, lat)
+                j = _nearest_1d(g.lon, lon, wrap=True)
             return None if i is None or j is None else (i, j)
         d2 = (g.lat - lat) ** 2 + (lon_diff(g.lon, lon) * np.cos(np.deg2rad(lat))) ** 2
         if not np.isfinite(d2).any():
@@ -356,6 +564,13 @@ def pick_point(da: xr.DataArray, geo: GeoInfo, grid: GeoGrid, lat, lon, indices)
 def _extent(grid):
     south, west, north, east = grid.bounds
     return north - south, east - west
+
+
+def _in_cell(edges, q):
+    """Index of the cell between ascending `edges` that holds `q`."""
+    if not edges[0] <= q <= edges[-1]:
+        return None
+    return min(int(np.searchsorted(edges, q, side="right")) - 1, len(edges) - 2)
 
 
 def _nearest_1d(coord, q, wrap=False):

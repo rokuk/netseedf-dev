@@ -84,3 +84,22 @@ def test_series_frame(salinity):
     assert (frame["lat"] == float(salinity.lat[4])).all()  # ...unless they're coordinates already
     assert (frame["depth"] == float(salinity.depth[1])).all()
     np.testing.assert_array_equal(frame["salinity"], series.values)
+
+
+def test_load_selection_reads_distant_indices_as_blocks(salinity, monkeypatch):
+    import xarray as xr
+
+    from netseedf.core import slicing
+    sub = salinity.isel(time=0, depth=0)
+    read = []
+    original = xr.DataArray.isel
+
+    def spy(self, indexers=None, **kw):
+        out = original(self, indexers, **kw)
+        read.append(out.size)
+        return out
+    monkeypatch.setattr(xr.DataArray, "isel", spy)
+    cols = np.array([0, 1, 2, 37, 38, 39])  # both ends of 40 longitudes
+    values = slicing.load_selection(sub, (slice(0, 30, 1), cols))
+    np.testing.assert_array_equal(values, sub.values[:, cols])
+    assert max(read) <= 30 * 3  # two blocks of 3 columns, not all 40

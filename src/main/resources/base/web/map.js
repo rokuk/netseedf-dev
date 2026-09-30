@@ -5,13 +5,22 @@
 const netseedf = (() => {
   const osmAttribution =
     '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+  // Coastlines and borders from the bundled Natural Earth files (see setOutlines): the
+  // "None" basemap, which works offline. Drawn in their own pane, above the data.
+  const outlineRenderer = L.canvas({ pane: "outlines" });
+  const coastlines = L.geoJSON(null, {
+    style: { color: "#333", weight: 1, fill: false },
+    renderer: outlineRenderer,
+    interactive: false,
+  });
+  const borders = L.geoJSON(null, {
+    style: { color: "#777", weight: 0.7, fill: false },
+    renderer: outlineRenderer,
+    interactive: false,
+  });
   const basemaps = {
     "OpenStreetMap": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19, attribution: osmAttribution,
-    }),
-    "CARTO Positron": L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-      subdomains: "abcd", maxZoom: 20,
-      attribution: osmAttribution + ' &copy; <a href="https://carto.com/attributions">CARTO</a>',
     }),
     "Esri World Imagery": L.tileLayer(
       "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
@@ -24,17 +33,16 @@ const netseedf = (() => {
       attribution: osmAttribution + ', SRTM | Style: &copy; <a href="https://opentopomap.org">' +
         "OpenTopoMap</a> (CC-BY-SA)",
     }),
-    "None (offline)": L.layerGroup(),
+    "None": L.layerGroup([coastlines, borders]),
   };
-  const coastlines = L.geoJSON(null, {
-    style: { color: "#333", weight: 1, fill: false },
-    interactive: false,
-  });
 
   const map = L.map("map", { worldCopyJump: true, preferCanvas: true, zoomSnap: 0.25 })
     .setView([20, 0], 2);
+  const outlinePane = map.createPane("outlines");
+  outlinePane.style.zIndex = 440; // above the data (overlayPane, 400), below the grid lines
+  outlinePane.style.pointerEvents = "none";
   basemaps["OpenStreetMap"].addTo(map);
-  L.control.layers(basemaps, { "Coastlines (offline)": coastlines }).addTo(map);
+  L.control.layers(basemaps).addTo(map);
   L.control.scale().addTo(map);
 
   const info = L.control({ position: "bottomleft" });
@@ -477,9 +485,14 @@ const netseedf = (() => {
     updateOverview();
   }
 
-  function setCoastlines(geojson) {
-    coastlines.clearLayers();
-    coastlines.addData(geojson);
+  // {coastlines, borders}: GeoJSON of each (or null if it couldn't be loaded).
+  function setOutlines(outlines) {
+    for (const [layer, geojson] of [[coastlines, outlines.coastlines], [borders, outlines.borders]]) {
+      layer.clearLayers();
+      if (geojson) {
+        layer.addData(geojson);
+      }
+    }
   }
 
   function clear() {
@@ -587,5 +600,5 @@ const netseedf = (() => {
     bridge.viewChanged(b.getSouth(), b.getWest(), b.getNorth(), b.getEast());
   });
 
-  return { setData, setDetail, setGridLines, setOpacity, setCoastlines, closePopup, clear };
+  return { setData, setDetail, setGridLines, setOpacity, setOutlines, closePopup, clear };
 })();

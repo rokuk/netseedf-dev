@@ -232,6 +232,58 @@ def wrf_like(path):
         v[:] = t2
 
 
+def bounded(path):
+    """Regular grid whose cell bounds aren't halfway between the centres (CF 7.1)."""
+    lat_b = np.array([30, 34, 40, 42, 50, 60], dtype=float)
+    lon_b = np.array([-10, -4, 0, 10, 12, 20, 30], dtype=float)
+    lat = (lat_b[:-1] + lat_b[1:]) / 2
+    lon = lon_b[:-1] + 0.25 * np.diff(lon_b)  # centres off-centre in their cells
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.Conventions = "CF-1.12"
+        nc.createDimension("nv", 2)
+        for name, centres, edges, units in (("lat", lat, lat_b, "degrees_north"),
+                                            ("lon", lon, lon_b, "degrees_east")):
+            nc.createDimension(name, len(centres))
+            v = nc.createVariable(name, "f8", (name,))
+            v.units, v.bounds = units, f"{name}_bnds"
+            v[:] = centres
+            bnds = nc.createVariable(f"{name}_bnds", "f8", (name, "nv"))
+            bnds[:] = np.column_stack([edges[:-1], edges[1:]])
+        v = nc.createVariable("tas", "f4", ("lat", "lon"))
+        v.units = "K"
+        v[:] = _field(lat[:, None], lon[None, :])
+
+
+def trajectories(path):
+    """CF 9 trajectories of different lengths, padded with missing values."""
+    n_traj, n_obs = 3, 20
+    lengths = [20, 12, 7]
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.Conventions = "CF-1.12"
+        nc.featureType = "trajectory"
+        nc.createDimension("trajectory", n_traj)
+        nc.createDimension("obs", n_obs)
+        tid = nc.createVariable("trajectory", "i4", ("trajectory",))
+        tid.cf_role = "trajectory_id"
+        tid[:] = np.arange(n_traj)
+        arrays = {name: np.full((n_traj, n_obs), -999.0) for name in ("time", "lat", "lon", "temp")}
+        for k, n in enumerate(lengths):
+            s = np.arange(n)
+            arrays["time"][k, :n] = s
+            arrays["lat"][k, :n] = 40 + 3 * k + 0.2 * s
+            arrays["lon"][k, :n] = -5 + 4 * k + 0.3 * s + np.sin(s / 3)
+            arrays["temp"][k, :n] = 15 + RNG.normal(0, 1, n)
+        attrs = {"time": {"units": "hours since 2024-07-01", "standard_name": "time"},
+                 "lat": {"units": "degrees_north", "standard_name": "latitude"},
+                 "lon": {"units": "degrees_east", "standard_name": "longitude"},
+                 "temp": {"units": "degC", "coordinates": "time lat lon"}}
+        for name, values in arrays.items():
+            v = nc.createVariable(name, "f4" if name == "temp" else "f8", ("trajectory", "obs"),
+                                  fill_value=-999.0)
+            v.setncatts(attrs[name])
+            v[:] = values
+
+
 WRITERS = {
     "regular_global.nc": regular_global,
     "curvilinear.nc": curvilinear,
@@ -245,6 +297,8 @@ WRITERS = {
     "points.nc": points,
     "pacific.nc": pacific,
     "wrf_like.nc": wrf_like,
+    "bounded.nc": bounded,
+    "trajectories.nc": trajectories,
 }
 
 

@@ -13,6 +13,7 @@ dependencies = [
     "netcdf4>=1.7.4",
     "numpy>=2.5.3",
     "pandas>=3.0.6",
+    "pylint>=4.0.9",
     "pyside6>=6.11.2",
     "xarray>=2026.7.0",
 ]
@@ -41,3 +42,11 @@ src = ["src/main/python", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pylint.main]
+# Compiled extensions pylint can't introspect statically; let it import them.
+extension-pkg-allow-list = ["PySide6", "netCDF4"]
+
+[tool.pylint.typecheck]
+# PySide6 signals introspect as methods, hiding their connect/emit/disconnect.
+generated-members = ["connect", "emit", "disconnect"]

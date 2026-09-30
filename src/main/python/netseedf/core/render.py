@@ -22,8 +22,8 @@ from matplotlib.colors import Normalize, to_hex
 from matplotlib.figure import Figure
 from PIL import Image
 
-from netseedf.core.coords import MERCATOR_MAX_LAT, GeoGrid, cell_edges
-from netseedf.core.gridlines import cell_corners, unwrap_lon
+from netseedf.core.coords import MERCATOR_MAX_LAT, GeoGrid, cell_edges, fill_missing_positions
+from netseedf.core.gridlines import cell_corners, grid_corners
 
 PIXELS_PER_CELL = 3
 MAX_POLYGON_CELLS = 20_000  # more and drawing every cell as a polygon gets slow
@@ -125,11 +125,12 @@ def cell_polygons(grid: GeoGrid, cmap, vmin, vmax, max_cells=MAX_POLYGON_CELLS) 
         return None
     if grid.values.size > max_cells or min(grid.values.shape) < 2:
         return None
-    lat, lon = cell_corners(grid.lat), cell_corners(unwrap_lon(grid.lon))
+    lat, lon = grid_corners(grid)
     ok = np.isfinite(lat) & np.isfinite(lon)
     if not ok.any():
         return None
     corners_ok = ok[:-1, :-1] & ok[1:, :-1] & ok[:-1, 1:] & ok[1:, 1:]
+    corners_ok &= np.isfinite(grid.lat) & np.isfinite(grid.lon)  # no cell where its position is missing
     values = np.where(corners_ok, np.asarray(grid.values, dtype=float), np.nan)
     colors = point_colors(values.ravel(), cmap, vmin, vmax)
     return Cells(values.shape, np.round(lat, 6).ravel().tolist(), np.round(lon, 6).ravel().tolist(),
@@ -138,13 +139,11 @@ def cell_polygons(grid: GeoGrid, cmap, vmin, vmax, max_cells=MAX_POLYGON_CELLS) 
 
 
 def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
-    lat, lon = grid.lat, grid.lon
-    values = np.array(grid.values, dtype=float)
-    values[_seam_mask(lon)] = np.nan  # cells straddling the antimeridian would smear across
-    ok = np.isfinite(lat) & np.isfinite(lon)
+    ok = np.isfinite(grid.lat) & np.isfinite(grid.lon)
     if not ok.any():
         return None
-    x, y = lon, mercator_y(lat)
+    lat, lon, values = fill_missing_positions(grid.lat, grid.lon, np.array(grid.values, dtype=float))
+    values[_seam_mask(lon)] = np.nan  # cells straddling the antimeridian would smear across
     ny, nx = values.shape
     width = int(np.clip(nx * PIXELS_PER_CELL, 256, max_px))
     height = int(np.clip(ny * PIXELS_PER_CELL, 256, max_px))
@@ -154,18 +153,34 @@ def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
     FigureCanvasAgg(fig)
     ax = fig.add_axes((0, 0, 1, 1))
     ax.set_axis_off()
-    ax.pcolormesh(x, y, np.ma.masked_invalid(values), cmap=_cmap(cmap), norm=Normalize(vmin, vmax),
-                  shading="nearest", antialiased=False)
-    ax.autoscale(tight=True)
-    x0, x1 = ax.get_xlim()
-    y0, y1 = ax.get_ylim()
-    y0, y1 = max(y0, mercator_y(-90)), min(y1, mercator_y(90))
+    style = dict(cmap=_cmap(cmap), norm=Normalize(vmin, vmax), antialiased=False)
+    if min(ny, nx) < 2:
+        x, y = lon, mercator_y(lat)
+        ax.pcolormesh(x, y, np.ma.masked_invalid(values), shading="nearest", **style)
+        inside = np.ones(x.shape, dtype=bool)
+    else:
+        # The corners halfway between the centres (what shading="nearest" would use), given
+        # explicitly: matplotlib's guess at them doesn't allow for missing positions.
+        x, y = cell_corners(lon), mercator_y(cell_corners(lat))
+        ax.pcolormesh(x, y, np.ma.masked_invalid(values), shading="flat", **style)
+        inside = _corners_of(ok)  # the image covers the cells with positions, not the made-up ones
+    x0, x1 = float(np.min(x[inside])), float(np.max(x[inside]))
+    y0, y1 = max(float(np.min(y[inside])), mercator_y(-90)), min(float(np.max(y[inside])), mercator_y(90))
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0, y1)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=100, transparent=True)
     return Overlay(buf.getvalue(), float(inverse_mercator_y(y0)), float(x0),
                    float(inverse_mercator_y(y1)), float(x1))
+
+
+def _corners_of(cells):
+    """Which corners (ny + 1, nx + 1) belong to any of the `cells` (ny, nx)."""
+    corners = np.zeros((cells.shape[0] + 1, cells.shape[1] + 1), dtype=bool)
+    for dj in (0, 1):
+        for di in (0, 1):
+            corners[dj:dj + cells.shape[0], di:di + cells.shape[1]] |= cells
+    return corners
 
 
 def _seam_mask(lon):

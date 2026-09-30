@@ -83,6 +83,16 @@ def _selection(n, window, max_size):
 
 def load_selection(sub: xr.DataArray, selection) -> np.ndarray:
     """Read the selected indices of a lazy array (one entry of `selection` per dim)."""
+    selection = tuple(selection)
+    for axis, sel in enumerate(selection):
+        # Indices far apart (e.g. both ends of 0..360° longitudes) are read as separate
+        # blocks, not as one spanning everything in between.
+        if not isinstance(sel, slice) and len(sel) > 1:
+            gaps = np.flatnonzero(np.abs(np.diff(sel)) > len(sel))
+            if gaps.size:
+                return np.concatenate([
+                    load_selection(sub, selection[:axis] + (part,) + selection[axis + 1:])
+                    for part in np.split(sel, gaps + 1)], axis=axis)
     box, local = {}, []
     for dim, sel in zip(sub.dims, selection, strict=True):
         if isinstance(sel, slice):
@@ -108,6 +118,22 @@ def is_time_dim(da: xr.DataArray, dim) -> bool:
                 or attrs.get("standard_name") == "time" or " since " in str(attrs.get("units", ""))):
             return True
     return str(dim).lower() in ("time", "t", "times")
+
+
+# Vertical coordinates in these units increase downwards (CF 4.3.1) unless `positive` says otherwise.
+PRESSURE_UNITS = {"pa", "hpa", "kpa", "bar", "mbar", "millibar", "dbar", "decibar", "atm", "pascal",
+                  "hectopascal"}
+
+
+def is_downward(da: xr.DataArray, dim) -> bool:
+    """Does the coordinate along `dim` increase downwards, like depth or pressure (CF 4.3)?"""
+    coord = da.coords.get(dim)
+    if coord is None:
+        return False
+    positive = str(coord.attrs.get("positive", "")).strip().lower()
+    if positive in ("up", "down"):
+        return positive == "down"
+    return str(coord.attrs.get("units", "")).strip().lower() in PRESSURE_UNITS
 
 
 def time_dims(da: xr.DataArray, exclude=()) -> tuple[str, ...]:

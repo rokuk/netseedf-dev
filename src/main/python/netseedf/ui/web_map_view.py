@@ -1,4 +1,4 @@
-"""Web map tab: Leaflet slippy map in QtWebEngine with the data drawn on top."""
+"""Interactive map tab: Leaflet slippy map in QtWebEngine with the data drawn on top."""
 
 import json
 import sys
@@ -56,7 +56,7 @@ from netseedf.ui.style_bar import StyleBar
 MAX_SIZE_REGULAR = 2000
 MAX_SIZE_CURVILINEAR = 800
 MAX_POINTS = 20_000
-COASTLINE_SCALE = "110m"
+OUTLINE_SCALE = "110m"  # of the coastlines and borders on the "None" basemap
 DETAIL_DELAY_MS = 150
 MAX_GRID_LINES = 400  # more than this in view and the lines are hidden
 WEB_PROFILE_NAME = "webmap"  # names the on-disk cache and storage folders
@@ -97,7 +97,7 @@ class _Page(QWebEnginePage):
 
 
 class WebMapView(DataView):
-    title = "Web map"
+    title = "Interactive map"
 
     def __init__(self, state, resources, user_agent, parent=None):
         super().__init__(state, parent)
@@ -320,9 +320,10 @@ class WebMapView(DataView):
             return True
         # A full-resolution curvilinear overview with too many cells for polygons is an
         # image; zoomed in, few enough of them may be in view to draw exactly.
+        if self._grid.kind != "curvilinear" or self._overview_cells:
+            return False  # (points have index arrays for windows, not start and stop)
         sizes = [stop - start for start, stop in window.values()]
-        return (self._grid.kind == "curvilinear" and not self._overview_cells
-                and max(sizes) <= self._max_size and int(np.prod(sizes)) <= MAX_POLYGON_CELLS)
+        return max(sizes) <= self._max_size and int(np.prod(sizes)) <= MAX_POLYGON_CELLS
 
     # --- grid lines ---------------------------------------------------------------
 
@@ -355,9 +356,7 @@ class WebMapView(DataView):
 
     def _page_ready(self):
         self._ready = True
-        coastlines = _coastlines_geojson(self._resources)
-        if coastlines is not None:
-            self.web.page().runJavaScript(f"netseedf.setCoastlines({json.dumps(coastlines)});")
+        self.web.page().runJavaScript(f"netseedf.setOutlines({json.dumps(outlines_geojson(self._resources))});")
         self._call("setOpacity", self.opacity.value() / 100)
         pending, self._pending = self._pending, {}
         for js in pending.values():
@@ -432,22 +431,33 @@ def _qwebchannel_script():
     return script
 
 
-_coastlines_cache = {}
+OUTLINES = {  # name: (Natural Earth category, file)
+    "coastlines": ("physical", "coastline"),
+    "borders": ("cultural", "admin_0_boundary_lines_land"),
+}
+_outlines_cache = {}
 
 
-def _coastlines_geojson(resources):
-    """Natural Earth coastlines as GeoJSON, for the offline "Coastlines" layer."""
-    if "data" not in _coastlines_cache:
-        try:
-            import cartopy.io.shapereader as shpreader
-            from shapely.geometry import mapping
+def outlines_geojson(resources) -> dict:
+    """Natural Earth coastlines and borders as GeoJSON, for the offline "None" basemap.
 
-            path = resources("cartopy", "shapefiles", "natural_earth", "physical",
-                             f"ne_{COASTLINE_SCALE}_coastline.shp")
-            features = [{"type": "Feature", "properties": {}, "geometry": mapping(g)}
-                        for g in shpreader.Reader(path).geometries()]
-            _coastlines_cache["data"] = {"type": "FeatureCollection", "features": features}
-        except Exception as e:  # the web map still works without them
-            print(f"Couldn't load coastlines for the web map: {e}", file=sys.stderr)
-            _coastlines_cache["data"] = None
-    return _coastlines_cache["data"]
+    {name: FeatureCollection, or None if that file couldn't be read}.
+    """
+    for name, (category, file) in OUTLINES.items():
+        if name not in _outlines_cache:
+            _outlines_cache[name] = _shapes_geojson(resources, category, f"ne_{OUTLINE_SCALE}_{file}.shp")
+    return dict(_outlines_cache)
+
+
+def _shapes_geojson(resources, category, file):
+    try:
+        import cartopy.io.shapereader as shpreader
+        from shapely.geometry import mapping
+
+        path = resources("cartopy", "shapefiles", "natural_earth", category, file)
+        features = [{"type": "Feature", "properties": {}, "geometry": mapping(g)}
+                    for g in shpreader.Reader(path).geometries()]
+        return {"type": "FeatureCollection", "features": features}
+    except Exception as e:  # the web map still works without them
+        print(f"Couldn't load {file} for the web map: {e}", file=sys.stderr)
+        return None

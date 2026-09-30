@@ -3,7 +3,7 @@
 import numpy as np
 import xarray as xr
 
-from netseedf.core.coords import GeoGrid, GeoInfo, cell_edges, geo_grid, geo_window, normalize_lon
+from netseedf.core.coords import GeoGrid, GeoInfo, fill_missing_positions, geo_grid, geo_window, regular_edges
 
 Line = list[list[float]]  # [[lat, lon], ...]
 
@@ -25,9 +25,8 @@ def grid_lines(da: xr.DataArray, geo: GeoInfo, grid: GeoGrid, indices, box, max_
 
 def _regular_lines(geo, grid, box, max_lines):
     south, west, north, east = box
-    lat_edges = np.clip(cell_edges(np.sort(np.asarray(geo.lat.values, dtype=float))), -90, 90)
-    lon = normalize_lon(np.asarray(geo.lon.values, dtype=float), grid.lon_0_360)[0]
-    lon_edges = cell_edges(np.sort(lon))
+    (_, lat_edges), (_, lon_edges) = regular_edges(geo, grid.lon_0_360)
+    lat_edges = np.clip(lat_edges, -90, 90)
     lats = lat_edges[(lat_edges >= south) & (lat_edges <= north)]
     # The map may show more than one copy of the world, so repeat the grid every 360°.
     shifts = [k * 360.0 for k in range(int(np.floor((west - lon_edges[-1]) / 360)),
@@ -55,10 +54,28 @@ def _curvilinear_lines(da, geo, grid, indices, box, max_lines):
     fine = geo_grid(da, geo, indices, None, window, like=grid)
     if min(fine.lat.shape) < 2:
         return []
-    lat, lon = cell_corners(fine.lat), cell_corners(unwrap_lon(fine.lon))
+    lat, lon = grid_corners(fine)
     rows = [np.column_stack([lat[i], lon[i]]) for i in range(lat.shape[0])]
     cols = [np.column_stack([lat[:, j], lon[:, j]]) for j in range(lat.shape[1])]
     return [part for line in rows + cols for part in _finite_runs(line)]
+
+
+def grid_corners(grid: GeoGrid) -> tuple[np.ndarray, np.ndarray]:
+    """(lat, lon) of a curvilinear grid's cell corners: from its bounds, or estimated.
+
+    Longitudes have no jumps of 360 degrees. Where positions are missing, corners
+    come from the nearest valid ones; those only amid missing positions are NaN.
+    """
+    if grid.corners is not None:
+        return grid.corners
+    lat, lon, _ = fill_missing_positions(grid.lat, grid.lon, grid.values)
+    lat, lon = cell_corners(lat), cell_corners(unwrap_lon(lon))
+    missing = ~(np.isfinite(grid.lat) & np.isfinite(grid.lon))
+    if missing.any():
+        m = np.pad(missing, 1, constant_values=True)
+        lost = m[:-1, :-1] & m[1:, :-1] & m[:-1, 1:] & m[1:, 1:]
+        lat, lon = np.where(lost, np.nan, lat), np.where(lost, np.nan, lon)
+    return lat, lon
 
 
 def unwrap_lon(lon: np.ndarray) -> np.ndarray:

@@ -3,7 +3,7 @@
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
 )
 
 from netseedf.core.dataset import FILE_FILTER, OpenedFile, VariableRef, open_file
-from netseedf.ui.attributes_panel import AttributesPanel
 from netseedf.ui.base_view import DataView, wait_cursor
 from netseedf.ui.cartopy_map_view import CartopyMapView
 from netseedf.ui.dimension_panel import DimensionPanel
@@ -53,12 +52,6 @@ class MainWindow(QMainWindow):
         self.state = SelectionState(self)
 
         self.tree = VariableTree()
-        self.attributes = AttributesPanel()
-        left = QSplitter(Qt.Orientation.Vertical)
-        left.addWidget(self.tree)
-        left.addWidget(self.attributes)
-        left.setSizes([500, 250])
-
         self.info = InfoView()
         self.table = TableView(self.state)
         self.plot = PlotView(self.state)
@@ -81,7 +74,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.dims)
 
         splitter = QSplitter()
-        splitter.addWidget(left)
+        splitter.addWidget(self.tree)
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([320, 960])
@@ -154,7 +147,7 @@ class MainWindow(QMainWindow):
             <p><a href="{homepage}">{homepage}</a></p>
             <p>License: GNU General Public License v3.0.<br>
             Coastlines and borders: Natural Earth (public domain).<br>
-            Web map: Leaflet; basemaps &copy; OpenStreetMap contributors, CARTO, Esri,
+            Interactive map: Leaflet; basemaps &copy; OpenStreetMap contributors, Esri,
             OpenTopoMap.</p>""")
 
     # --- files ------------------------------------------------------------
@@ -210,7 +203,6 @@ class MainWindow(QMainWindow):
         self._files.pop(file_id).close()
         if not self._files:
             self.info.show_text("")
-            self.attributes.show_attrs("", {})
         self._update_title()
 
     # --- selection ----------------------------------------------------------
@@ -219,9 +211,8 @@ class MainWindow(QMainWindow):
         opened = self._files[ref.file_id]
         self.state.set_variable(opened, ref)
         da = self.state.da
-        self.attributes.show_attrs(f"of {ref.name}", da.attrs)
         try:
-            self.info.show_variable(opened, ref.group, da, self.state.geo)
+            self.info.show_variable(opened, ref.group, da)
         except Exception as e:
             traceback.print_exc()
             self.info.show_text(f"Couldn't read the header of {ref.name}: {e}")
@@ -229,8 +220,6 @@ class MainWindow(QMainWindow):
 
     def _select_file(self, file_id, group):
         opened = self._files[file_id]
-        label = opened.name if group == "/" else f"of group {group}"
-        self.attributes.show_attrs(f"of {label}", opened.dataset(group).attrs)
         try:
             self.info.show_file(opened, group)
         except Exception as e:

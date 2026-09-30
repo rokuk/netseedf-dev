@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from netseedf.core.coords import GridLocator, find_geo, geo_grid, normalize_lon, pick_point
+from netseedf.core.coords import GridLocator, find_geo, geo_grid, geo_window, normalize_lon, pick_point
 
 
 @pytest.fixture
@@ -151,3 +151,28 @@ def test_pick_point_curvilinear_and_points(ds):
     picked = pick_point(da, geo, coarse, lat, lon, {})
     assert picked.index == {"station": 12}
     assert (picked.lat, picked.lon) == pytest.approx((lat, lon))
+
+
+def test_window_across_the_ends_of_stored_longitudes(ds):
+    """lon is stored 0..358: a view around 0° has columns at both ends, not everything between."""
+    d = ds("regular_global.nc")
+    da, geo = d["sst"], find_geo(d["sst"], d)
+    coarse = geo_grid(da, geo, {"time": 1}, max_size=45)  # every 4th column
+    window = geo_window(geo, coarse, (40, -21, 60, 21))
+    cols = window["lon"]
+    assert isinstance(cols, np.ndarray) and len(cols) < 40  # of 180 columns
+    assert cols.min() == 0 and cols.max() == 179
+    detail = geo_grid(da, geo, {"time": 1}, max_size=45, window=window, like=coarse)
+    assert detail.slice.steps[1] == 1  # the detail is at full resolution along lon
+    assert np.all(np.diff(detail.lon) > 0) and detail.lon.min() < -20 and detail.lon.max() > 20
+    for j, lon in enumerate(detail.lon):
+        expected = da.isel(time=1).sel(lon=lon % 360).values[detail.index[0]]
+        np.testing.assert_array_equal(detail.values[:, j], expected)
+
+
+def test_window_within_stored_longitudes_is_a_range(ds):
+    d = ds("regular_global.nc")
+    geo = find_geo(d["sst"], d)
+    coarse = geo_grid(d["sst"], geo, {}, max_size=45)
+    window = geo_window(geo, coarse, (40, 30, 60, 60))
+    assert isinstance(window["lon"], tuple) and isinstance(window["lat"], tuple)

@@ -6,6 +6,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/samples" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/testfiles" />
     </content>
     <orderEntry type="jdk" jdkName="~\Documents\Code\netseedf-dev\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

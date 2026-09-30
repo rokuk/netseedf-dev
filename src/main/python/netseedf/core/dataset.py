@@ -8,20 +8,22 @@ import netCDF4
 import numpy as np
 import xarray as xr
 
+from netseedf.core import cf
+
 ENGINE = "netcdf4"
 
 FILE_FILTER = "NetCDF files (*.nc *.nc4 *.cdf *.netcdf *.h5 *.hdf5 *.he5);;All files (*)"
 
-# Tried in order until one opens the file. Undecodable metadata (e.g. time
-# units like "days since yesterday") makes xarray raise, so fall back to
-# showing raw values instead of refusing the file.
+# Tried in order until one opens the file. Times are decoded by cf.decode_times, one
+# variable at a time (see there why not by xarray). Should CF decoding fail
+# anyway, show values as stored in the file instead of refusing it.
 _DECODE_ATTEMPTS = (
-    ({}, None),
-    ({"decode_times": False, "decode_timedelta": False},
-     "Time values could not be decoded and are shown as raw numbers."),
-    ({"decode_cf": False},
-     "CF conventions could not be applied; all values are shown as stored in the file."),
+    {"decode_times": False, "decode_timedelta": False},
+    {"decode_cf": False},
 )
+_NO_CF = "CF conventions could not be applied; all values are shown as stored in the file."
+# xarray warnings that aren't news to the user
+_QUIET = ("has multiple fill values", "Ambiguous reference date string")
 
 
 @dataclass(frozen=True)
@@ -60,19 +62,62 @@ def open_file(path) -> OpenedFile:
     """Open a NetCDF file lazily, including all of its groups."""
     path = Path(path)
     first_error = None
-    for kwargs, note in _DECODE_ATTEMPTS:
+    for kwargs in _DECODE_ATTEMPTS:
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 groups, closers = _open_groups(path, **kwargs)
+                groups = {group: _distinct_dims(ds) for group, ds in groups.items()}
+                groups, messages = _apply_cf(groups, **kwargs)
         except (ValueError, TypeError, OverflowError) as e:
             first_error = first_error or e
             continue
-        messages = [note] if note else []
-        messages += _unique(str(w.message).splitlines()[0] for w in caught
-                            if issubclass(w.category, (xr.SerializationWarning, RuntimeWarning)))
+        lines = (str(w.message).splitlines()[0] for w in caught
+                 if issubclass(w.category, (xr.SerializationWarning, RuntimeWarning)))
+        messages += _unique(line for line in lines if not any(q in line for q in _QUIET))
         return OpenedFile(path, groups, messages, closers)
     raise first_error
+
+
+def _apply_cf(groups, decode_cf=True, **_):
+    """What xarray leaves out of CF decoding; returns the groups and notes for the user."""
+    if not decode_cf:
+        return groups, [_NO_CF]
+    messages, undecoded = [], []
+    for group, ds in groups.items():
+        groups[group], failed = cf.decode_times(ds)
+        undecoded += failed
+    if undecoded:
+        names = ", ".join(_unique(undecoded))
+        messages.append(f"Time values could not be decoded and are shown as raw numbers ({names}).")
+    groups = {group: cf.mask_invalid(ds) for group, ds in groups.items()}
+    return cf.attach_group_coordinates(groups), messages
+
+
+def _distinct_dims(ds: xr.Dataset) -> xr.Dataset:
+    """Repeated dimensions, e.g. of a matrix AVK(time, PRESSURE, PRESSURE), under names of their own.
+
+    xarray selects by dimension name, so it can't slice such variables. The
+    second PRESSURE becomes PRESSURE_2, with the same coordinate.
+    """
+    updates, coords = {}, {}
+    for name, var in ds.variables.items():
+        if len(set(var.dims)) == len(var.dims):
+            continue
+        dims, seen = [], {}
+        for d in var.dims:
+            seen[d] = seen.get(d, 0) + 1
+            new = d if seen[d] == 1 else f"{d}_{seen[d]}"
+            dims.append(new)
+            if new != d and new not in coords and d in ds.indexes:
+                coords[new] = xr.Variable((new,), ds[d].values, ds[d].attrs)
+        renamed = var.copy(deep=False)  # still lazy
+        renamed.dims = tuple(dims)
+        updates[name] = renamed
+    if not updates:
+        return ds
+    ds = ds.drop_vars(list(updates))
+    return ds.assign_coords(coords).assign(updates)
 
 
 def _open_groups(path, **kwargs):
@@ -104,9 +149,13 @@ class VariableInfo:
 
     @property
     def dims_text(self):
-        if not self.dims:
-            return "scalar"
-        return "(" + ", ".join(f"{d}={n}" for d, n in zip(self.dims, self.shape, strict=True)) + ")"
+        return _dims_text(self.dims, self.shape)
+
+
+def _dims_text(dims, shape):
+    if not dims:
+        return "scalar"
+    return "(" + ", ".join(f"{d}={n}" for d, n in zip(dims, shape, strict=True)) + ")"
 
 
 def describe(da: xr.DataArray) -> VariableInfo:
@@ -129,7 +178,7 @@ def coordinate_variables(ds: xr.Dataset):
     return [describe(ds[name]) for name in ds.coords]
 
 
-# --- ncdump -h style header -------------------------------------------------
+# --- the header as stored in the file ----------------------------------------
 
 _CDL_TYPES = {
     "int8": "byte", "uint8": "ubyte", "int16": "short", "uint16": "ushort",
@@ -138,28 +187,59 @@ _CDL_TYPES = {
 }
 
 
-def header_text(path, group="/") -> str:
-    """CDL description of the file (or one group), like ``ncdump -h``."""
-    with netCDF4.Dataset(path) as nc:
-        node = nc if group == "/" else nc[group.lstrip("/")]
-        title = Path(path).stem if group == "/" else f"group: {node.name}"
-        lines = [f"netcdf {title} {{" if group == "/" else f"{title} {{"]
-        _cdl_group(node, lines, indent="")
-        lines.append("}")
-    return "\n".join(lines)
+@dataclass(frozen=True)
+class DimensionHeader:
+    name: str
+    size: int
+    unlimited: bool
 
 
-def variable_header_text(path, group, name) -> str:
+@dataclass(frozen=True)
+class VariableHeader:
+    name: str
+    dtype: str  # CDL type on disk, e.g. "short" for packed data
+    dims: tuple[str, ...]
+    shape: tuple[int, ...]
+    attrs: dict
+
+    @property
+    def dims_text(self):
+        return _dims_text(self.dims, self.shape)
+
+
+@dataclass(frozen=True)
+class GroupHeader:
+    dimensions: list[DimensionHeader]
+    variables: list[VariableHeader]
+    attrs: dict  # global (or group) attributes
+
+
+def group_header(path, group="/") -> GroupHeader:
+    """Dimensions, variables and attributes of the file (or one group), as ``ncdump -h`` lists them."""
     with netCDF4.Dataset(path) as nc:
-        node = nc if group == "/" else nc[group.lstrip("/")]
-        if name not in node.variables:  # e.g. an inherited coordinate
-            for parent in _parents(node):
-                if name in parent.variables:
-                    node = parent
-                    break
-        lines = []
-        _cdl_variable(node.variables[name], lines, "")
-    return "\n".join(lines)
+        node = _node(nc, group)
+        return GroupHeader(
+            dimensions=[DimensionHeader(d.name, len(d), d.isunlimited()) for d in node.dimensions.values()],
+            variables=[_variable_header(v) for v in node.variables.values()],
+            attrs=_attrs(node),
+        )
+
+
+def variable_header(path, group, name) -> VariableHeader | None:
+    """The variable as stored, with all of its attributes (xarray moves some to ``encoding``).
+
+    None if the file has no such variable (one netseedf made up).
+    """
+    with netCDF4.Dataset(path) as nc:
+        node = _node(nc, group)
+        for n in (node, *_parents(node)):  # e.g. an inherited coordinate
+            if name in n.variables:
+                return _variable_header(n.variables[name])
+    return None
+
+
+def _node(nc, group):
+    return nc if group == "/" else nc[group.lstrip("/")]
 
 
 def _parents(node):
@@ -168,37 +248,12 @@ def _parents(node):
         yield node
 
 
-def _cdl_group(node, lines, indent):
-    if node.dimensions:
-        lines.append(f"{indent}dimensions:")
-        for dim in node.dimensions.values():
-            if dim.isunlimited():
-                lines.append(f"{indent}\t{dim.name} = UNLIMITED ; // ({len(dim)} currently)")
-            else:
-                lines.append(f"{indent}\t{dim.name} = {len(dim)} ;")
-    if node.variables:
-        lines.append(f"{indent}variables:")
-        for var in node.variables.values():
-            _cdl_variable(var, lines, indent + "\t")
-    attrs = node.ncattrs()
-    if attrs:
-        lines.append("")
-        lines.append(f"{indent}// {'global' if node.parent is None else 'group'} attributes:")
-        for key in attrs:
-            lines.append(f"{indent}\t\t:{key} = {_cdl_value(node.getncattr(key))} ;")
-    for child in node.groups.values():
-        lines.append("")
-        lines.append(f"{indent}group: {child.name} {{")
-        _cdl_group(child, lines, indent + "  ")
-        lines.append(f"{indent}  }} // group {child.name}")
+def _variable_header(var):
+    return VariableHeader(var.name, _cdl_type(var), tuple(var.dimensions), tuple(var.shape), _attrs(var))
 
 
-def _cdl_variable(var, lines, indent):
-    dtype = _cdl_type(var)
-    dims = ", ".join(var.dimensions)
-    lines.append(f"{indent}{dtype} {var.name}({dims}) ;" if dims else f"{indent}{dtype} {var.name} ;")
-    for key in var.ncattrs():
-        lines.append(f"{indent}\t{var.name}:{key} = {_cdl_value(var.getncattr(key))} ;")
+def _attrs(obj):
+    return {key: obj.getncattr(key) for key in obj.ncattrs()}
 
 
 def _cdl_type(var):
@@ -210,19 +265,3 @@ def _cdl_type(var):
     if dt.kind == "S" and dt.itemsize == 1:
         return "char"
     return _CDL_TYPES.get(dt.name, dt.name)
-
-
-def _cdl_value(value):
-    if isinstance(value, str):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
-    arr = np.atleast_1d(value)
-    return ", ".join(_cdl_scalar(v) for v in arr)
-
-
-def _cdl_scalar(v):
-    if isinstance(v, (np.floating, float)):
-        text = "NaN" if np.isnan(v) else repr(float(v))
-        return text + ("f" if isinstance(v, np.float32) else "")
-    if isinstance(v, (bytes, np.bytes_)):
-        return '"' + v.decode(errors="replace") + '"'
-    return str(v)

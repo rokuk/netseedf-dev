@@ -1,0 +1,6 @@
+{
+    "categories": "Utility;",
+    "description": "Viewer for NetCDF files",
+    "author_email": "kontakt@rokuk.org",
+    "url": "https://github.com/rokuk/netseedf-dev"
+}

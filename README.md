@@ -7,11 +7,13 @@ Quick and simple viewer for NetCDF files, for Windows and macOS.
 - **Table**: any 2D slice, read lazily while scrolling; copy (Ctrl+C) or export to CSV.
 - **Plot**: line plot or heatmap of any slice, with zoom, pan and PNG export.
 - **Map**: Cartopy map with coastlines and borders and a choice of projections. Works offline.
-- **Web map**: Leaflet map on OpenStreetMap / satellite / topo tiles (needs internet), with the value under the mouse.
+- **Interactive map**: Leaflet map on OpenStreetMap / satellite / topo tiles (needs internet), with the value under the mouse.
 
 Sliders below the tabs step through the remaining dimensions (time, depth, …); ▶ animates.
 Regular lat/lon grids, curvilinear grids with 2D lat/lon (including WRF output) and
 station data (lat/lon along one dimension) can all be mapped.
+
+NetSeeDF complies with the [CF conventions](https://cfconventions.org/cf-conventions/cf-conventions.html).
 
 ## Development
 
@@ -32,12 +34,13 @@ The app runs from source without fbs: `netseedf/context.py` uses fbs Pro's
 
 fbs doesn't cross-compile: build the Windows installer on Windows and the macOS one on a Mac.
 
-1. Install fbs Pro into the venv with from saved file or the link from your purchase email, e.g.
-   `uv pip install <url>`. Keep it out of `pyproject.toml`: the URL contains your license key.
-2. `uv run fbs run` starts the app the way fbs will package it.
-3. `uv run fbs freeze` builds `target/netseedf/` (Windows) or `target/netseedf.app` (macOS).
+1. Install fbs Pro into the venv with from the fbs file, e.g.
+   `uv pip install <file>`.
+2. Install PySide6
+3. `uv run fbs run` starts the app the way fbs will package it.
+4. `uv run fbs freeze` builds `target/netseedf/` (Windows) or `target/netseedf.app` (macOS).
    Start it and open a file before building the installer.
-4. `uv run fbs installer` builds `target/netseedfSetup.exe` (needs [NSIS](https://nsis.sourceforge.io)
+5`uv run fbs installer` builds `target/netseedfSetup.exe` (needs [NSIS](https://nsis.sourceforge.io)
    on `PATH`) or `target/netseedf.dmg`.
 
 Settings live in `src/build/settings/*.json`. `extra_pyinstaller_args` there already makes
@@ -68,5 +71,5 @@ scripts/fetch_resources.py         re-download Natural Earth data and Leaflet
 ## Credits
 
 Coastlines and borders from [Natural Earth](https://www.naturalearthdata.com) (public domain).
-Web map by [Leaflet](https://leafletjs.com) (BSD-2-Clause); basemaps © OpenStreetMap
-contributors, CARTO, Esri and OpenTopoMap. Licensed under the GNU GPL v3 (see `LICENSE`).
+Interactive map by [Leaflet](https://leafletjs.com) (BSD-2-Clause); basemaps © OpenStreetMap
+contributors, Esri and OpenTopoMap. Licensed under the GNU GPL v3 (see `LICENSE`).

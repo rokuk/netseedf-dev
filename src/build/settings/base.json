@@ -2,14 +2,22 @@
     "app_name": "NetSeeDF",
     "author": "Rok Kuk",
     "main_module": "src/main/python/main.py",
-    "version": "0.1.0",
+    "version": "2.1.0",
     "homepage": "https://github.com/rokuk/netseedf-dev",
     "contact": "kontakt@rokuk.org",
     "public_settings": ["homepage", "contact"],
     "hidden_imports": [],
     "extra_pyinstaller_args": [
         "--copy-metadata", "xarray",
-        "--collect-data", "cartopy",
-        "--collect-data", "pyproj"
+        "--collect-data", "pyproj",
+        "--exclude-module", "PySide6.QtQml",
+        "--exclude-module", "PySide6.QtQuick",
+        "--exclude-module", "PySide6.QtQuickWidgets",
+        "--exclude-module", "PySide6.QtOpenGL",
+        "--exclude-module", "PySide6.QtPositioning",
+        "--exclude-module", "PySide6.QtMultimedia",
+        "--exclude-module", "PySide6.QtCharts",
+        "--exclude-module", "PySide6.QtPdf",
+        "--exclude-module", "PySide6.QtGraphs"
     ]
 }

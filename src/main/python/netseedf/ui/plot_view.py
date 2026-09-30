@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import matplotlib.dates as mdates
 import numpy as np
+from matplotlib.artist import Artist
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout
@@ -18,7 +19,15 @@ from netseedf.core.formatting import (
     variable_label,
 )
 from netseedf.core.render import cell_edges
-from netseedf.core.slicing import Slice, as_float, coord_values, extract, index_window, is_finer
+from netseedf.core.slicing import (
+    Slice,
+    as_float,
+    coord_values,
+    extract,
+    index_window,
+    is_downward,
+    is_finer,
+)
 from netseedf.ui.base_view import DataView, wait_cursor
 from netseedf.ui.mpl_canvas import MplWidget
 from netseedf.ui.style_bar import StyleBar
@@ -95,7 +104,7 @@ class _Layer:
     values: np.ndarray
     rows: np.ndarray  # full-resolution indices along y and x
     cols: np.ndarray
-    artist: object
+    artist: Artist  # AxesImage or QuadMesh
 
     def lookup(self, xa, ya, x, y, strict):
         """(row, col, value) nearest to x/y; None if outside the layer (when strict)."""
@@ -299,9 +308,10 @@ class PlotView(DataView):
         previous = self.mpl.begin((self.state.ref, HEATMAP, ydim, xdim))
         self._ax = ax = self.mpl.figure.add_subplot()
         self._base = self._draw_layer(sl, zorder=1)
-        # Values grow to the right and upwards, e.g. north up when latitude is stored N to S.
+        # Values grow to the right and upwards, e.g. north up when latitude is stored N to S,
+        # except depth and pressure, which grow downwards.
         ax.set_xlim(sorted(ax.get_xlim()))
-        ax.set_ylim(sorted(ax.get_ylim()))
+        ax.set_ylim(sorted(ax.get_ylim(), reverse=is_downward(da, ydim)))
         for a, axis in ((xa, ax.xaxis), (ya, ax.yaxis)):
             a.label_axis(axis)
             if a.is_date:
