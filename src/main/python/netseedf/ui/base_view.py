@@ -19,6 +19,13 @@ def wait_cursor():
         QGuiApplication.restoreOverrideCursor()
 
 
+def buddy_label(text, widget) -> QLabel:
+    """A label naming `widget` for screen readers; its &-mnemonic (Alt+key) focuses it."""
+    label = QLabel(text)
+    label.setBuddy(widget)
+    return label
+
+
 class DataView(QWidget):
     """A tab showing the current variable.
 

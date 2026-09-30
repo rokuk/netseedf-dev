@@ -13,7 +13,7 @@ import pytest
 
 from netseedf.core.coords import GridLocator, fill_missing_positions, find_geo, geo_grid, pick_point
 from netseedf.core.dataset import describe, open_file
-from netseedf.core.formatting import format_value, index_label, variable_label
+from netseedf.core.formatting import format_value, index_label, value_text, variable_label
 from netseedf.core.gridlines import grid_lines
 from netseedf.core.render import cell_polygons, render_overlay
 from netseedf.core.slicing import as_float, extract, is_time_dim, point_series, series_frame, time_dims
@@ -277,6 +277,16 @@ def test_labels_use_long_name_then_standard_name(cf_file):
     assert variable_label(f.variable("/", "b")) == "air_temperature [K]"
     assert variable_label(f.variable("/", "c")) == "c"
     assert describe(f.variable("/", "b")).long_name == "air_temperature"
+
+
+def test_celsius_units_display_as_degree_sign(cf_file):
+    def build(nc):
+        nc.createDimension("n", 2)
+        var(nc, "sst", "f4", ("n",), [1, 2], long_name="Sea temperature", units="degree_Celsius")
+
+    da = cf_file(build).variable("/", "sst")
+    assert variable_label(da) == "Sea temperature [°C]"
+    assert value_text(da, 1.5) == "1.5 °C"
 
 
 # --- 4.1 Latitude, 4.2 Longitude ---------------------------------------------------------------

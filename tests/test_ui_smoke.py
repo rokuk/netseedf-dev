@@ -13,7 +13,8 @@ import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 from PySide6 import QtWebEngineWidgets  # noqa: E402, F401 (must precede the QApplication)
 from PySide6.QtCore import QSettings  # noqa: E402
-from PySide6.QtWidgets import QFileDialog  # noqa: E402
+from PySide6.QtGui import QKeySequence  # noqa: E402
+from PySide6.QtWidgets import QAbstractButton, QFileDialog, QLabel  # noqa: E402
 
 from netseedf.context import SourceContext  # noqa: E402
 from netseedf.core.coords import geo_grid  # noqa: E402
@@ -99,6 +100,32 @@ def test_sliders_follow_state(window, samples):
     assert rows["depth"].value.text() == "50 m"
     assert window.table.model.value(0, 0) == pytest.approx(
         float(window.state.da.isel(time=0, depth=3, lat=0, lon=0)))
+
+
+def test_labels_name_their_controls_and_mnemonics_are_unique(window):
+    menus = [QKeySequence.mnemonic(a.text()) for a in window.menuBar().actions()]
+    for tab in range(window.tabs.count()):
+        page = window.tabs.widget(tab)
+        labels = [w for w in page.findChildren(QLabel) if "&" in w.text()]
+        assert all(label.buddy() is not None for label in labels), window.tabs.tabText(tab)
+        texts = [w.text() for w in labels + page.findChildren(QAbstractButton)]
+        keys = menus + [k for k in map(QKeySequence.mnemonic, texts) if not k.isEmpty()]
+        assert len(keys) == len(set(keys)), window.tabs.tabText(tab)
+
+
+def test_dimension_controls_are_named_for_screen_readers(window, samples):
+    window.open_path(samples["four_d.nc"])
+    window.tabs.setCurrentWidget(window.table)
+    depth = {r.dim: r for r in window.dims._rows}["depth"]
+    window.state.set_indices({"depth": 3})
+    assert depth.slider.accessibleName() == "depth index"
+    assert depth.slider.accessibleDescription() == "50 m"
+    assert depth.play.accessibleName() == "Play depth"
+    depth.play.setChecked(True)
+    assert depth.play.accessibleName() == "Pause depth"
+    depth.play.setChecked(False)
+    window.dims.focus_first()
+    assert window.dims._rows[0].slider.hasFocus()
 
 
 def test_time_starts_at_first_step_when_switching_variables(window, samples):

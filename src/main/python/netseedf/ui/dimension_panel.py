@@ -21,11 +21,13 @@ class _DimRow:
     def __init__(self, panel, layout, row, dim, size):
         self.dim = dim
         self.name = QLabel(f"<b>{dim}</b> ({size})")
-        self.slider = QSlider(Qt.Orientation.Horizontal, maximum=size - 1, pageStep=max(1, size // 10))
-        self.spin = QSpinBox(maximum=size - 1)
+        self.slider = QSlider(Qt.Orientation.Horizontal, maximum=size - 1, pageStep=max(1, size // 10),
+                              accessibleName=f"{dim} index")
+        self.spin = QSpinBox(maximum=size - 1, accessibleName=f"{dim} index")
         self.value = QLabel(minimumWidth=150)
         self.value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.play = QToolButton(text="▶", checkable=True, toolTip=f"Step through {dim}")
+        self.play = QToolButton(checkable=True)
+        self.set_playing(False)
         for w in (self.slider, self.spin, self.play):
             w.setEnabled(size > 1)
         for col, w in enumerate((self.name, self.slider, self.spin, self.value, self.play)):
@@ -34,6 +36,16 @@ class _DimRow:
         self.spin.valueChanged.connect(self.slider.setValue)
         self.slider.valueChanged.connect(lambda v: panel._index_changed(self, v))
         self.play.toggled.connect(lambda on: panel._play_toggled(self, on))
+
+    def show_value(self, text):
+        self.value.setText(text)
+        for w in (self.slider, self.spin):
+            w.setAccessibleDescription(text)  # read out with the index
+
+    def set_playing(self, on):
+        self.play.setText("⏸" if on else "▶")
+        self.play.setAccessibleName(f"{'Pause' if on else 'Play'} {self.dim}")
+        self.play.setToolTip(f"Pause stepping through {self.dim}" if on else f"Step through {self.dim}")
 
     def widgets(self):
         return (self.name, self.slider, self.spin, self.value, self.play)
@@ -70,9 +82,14 @@ class DimensionPanel(QWidget):
             row = _DimRow(self, self._layout, r, dim, da.sizes[dim])
             index = min(self.state.indices.get(dim, 0), da.sizes[dim] - 1)
             row.slider.setValue(index)
-            row.value.setText(index_label(da, dim, index))
+            row.show_value(index_label(da, dim, index))
             self._rows.append(row)
         self.setVisible(bool(dims))
+
+    def focus_first(self):
+        """Keyboard focus to the first dimension's slider, if there are any."""
+        if self._rows:
+            self._rows[0].slider.setFocus()
 
     def _sync(self):
         """Follow index changes made elsewhere (not the ones still pending from here)."""
@@ -85,10 +102,10 @@ class DimensionPanel(QWidget):
                 row.spin.setValue(index)
                 row.slider.blockSignals(False)
                 row.spin.blockSignals(False)
-                row.value.setText(index_label(self.state.da, row.dim, index))
+                row.show_value(index_label(self.state.da, row.dim, index))
 
     def _index_changed(self, row, value):
-        row.value.setText(index_label(self.state.da, row.dim, value))
+        row.show_value(index_label(self.state.da, row.dim, value))
         self._pending[row.dim] = value
         if not self._apply_timer.isActive():
             self._apply_timer.start()
@@ -102,7 +119,7 @@ class DimensionPanel(QWidget):
             if self._playing is not None and self._playing is not row:
                 self._playing.play.setChecked(False)
             self._playing = row
-            row.play.setText("⏸")
+            row.set_playing(True)
             self._play_timer.start()
         elif self._playing is row:
             self._stop_playing()
@@ -111,7 +128,7 @@ class DimensionPanel(QWidget):
         self._play_timer.stop()
         if self._playing is not None:
             row, self._playing = self._playing, None
-            row.play.setText("▶")
+            row.set_playing(False)
             row.play.setChecked(False)
 
     def _step(self):

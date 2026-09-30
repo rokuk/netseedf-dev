@@ -49,7 +49,7 @@ from netseedf.core.render import (
     render_overlay,
 )
 from netseedf.core.slicing import fixed_indices, is_finer, point_series, series_frame, time_dims
-from netseedf.ui.base_view import DataView, wait_cursor
+from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.cartopy_map_view import NO_GEO_MESSAGE, OUTLINE_SCALE
 from netseedf.ui.style_bar import StyleBar
 
@@ -105,11 +105,11 @@ class WebMapView(DataView):
         self.style_bar = StyleBar()
         self.opacity = QSlider(Qt.Orientation.Horizontal, minimum=0, maximum=100, value=75,
                                maximumWidth=120, toolTip="Opacity of the data layer")
-        self.grid_lines = QCheckBox("Grid lines", toolTip="Outline the cells of the data grid "
+        self.grid_lines = QCheckBox("&Grid lines", toolTip="Outline the cells of the data grid "
                                     "(when zoomed in far enough to draw them all)")
         self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
-        for w in (self.style_bar, QLabel("Opacity:"), self.opacity, self.grid_lines):
+        for w in (self.style_bar, buddy_label("O&pacity:", self.opacity), self.opacity, self.grid_lines):
             bar.addWidget(w)
         bar.addWidget(self.note, 1)
         self._layout = QVBoxLayout(self.body)
@@ -220,8 +220,7 @@ class WebMapView(DataView):
         found = found or self._locator.value_at(lat, lon)
         if found is not None:
             text += f"   {self.state.da.name} = {value_text(self.state.da, found[1])}"
-        self.status.emit(text)
-        return text
+        return text  # shown on the map itself, not in the status bar
 
     # --- clicking on a cell --------------------------------------------------
 

@@ -39,9 +39,6 @@
             <key>CFBundleTypeExtensions</key>
             <array>
                 <string>nc</string>
-                <string>nc4</string>
-                <string>cdf</string>
-                <string>netcdf</string>
             </array>
         </dict>
     </array>

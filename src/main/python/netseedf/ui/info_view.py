@@ -43,7 +43,7 @@ class InfoView(QWidget):
         for section in (self.attributes, self.dimensions, self.variables):
             sections.addWidget(section)
         sections.setSizes([400, 150, 250])
-        self.stats_button = QPushButton("Compute statistics", visible=False,
+        self.stats_button = QPushButton("Compute &statistics", visible=False,
                                         toolTip="Min, max and mean over the whole variable "
                                                 "(reads all of its data)")
         self.stats_button.clicked.connect(self._compute_stats)

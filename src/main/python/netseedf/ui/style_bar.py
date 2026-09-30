@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEd
 
 from netseedf.core.formatting import format_value
 from netseedf.core.style import COLORMAPS, Style
+from netseedf.ui.base_view import buddy_label
 
 
 class StyleBar(QWidget):
@@ -21,17 +22,19 @@ class StyleBar(QWidget):
         super().__init__(parent)
         self.cmap = QComboBox()
         self.cmap.addItems(COLORMAPS)
-        self.auto = QCheckBox("Auto range", checked=True,
+        self.auto = QCheckBox("&Auto range", checked=True,
                               toolTip="Colour range from each slice's smallest to largest value")
-        self.vmin = QLineEdit(minimumWidth=70, maximumWidth=90, placeholderText="min")
-        self.vmax = QLineEdit(minimumWidth=70, maximumWidth=90, placeholderText="max")
+        self.vmin = QLineEdit(minimumWidth=70, maximumWidth=90, placeholderText="min",
+                              accessibleName="Range minimum")
+        self.vmax = QLineEdit(minimumWidth=70, maximumWidth=90, placeholderText="max",
+                              accessibleName="Range maximum")
         for edit in (self.vmin, self.vmax):
             edit.setValidator(QDoubleValidator())
             edit.editingFinished.connect(self._range_edited)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        for w in (QLabel("Colours:"), self.cmap, QLabel("Range:"), self.vmin, QLabel("–"),
-                  self.vmax, self.auto):
+        for w in (buddy_label("&Colours:", self.cmap), self.cmap, buddy_label("&Range:", self.vmin),
+                  self.vmin, QLabel("–"), self.vmax, self.auto):
             layout.addWidget(w)
         self.cmap.currentTextChanged.connect(self.changed)
         self.cmap.currentTextChanged.connect(self.cmapPicked)

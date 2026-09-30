@@ -1,19 +1,22 @@
-# netseedf
+# NetSeeDF
 
-Quick and simple viewer for NetCDF files, for Windows and macOS.
+Quick and simple viewer for NetCDF files. Available for Windows and macOS.
+
+Inspired by Panoply, NetSeeDF is designed to be simpler tool that does not require a Java installation. Designed with students and researchers in mind, it lets you quickly explore available variables, their shapes, and visualize grid point values on a map.
 
 - **Tree** of the file's groups, variables and coordinates, with attributes.
-- **Info**: `ncdump -h`-style header, how the variable was decoded, statistics on demand.
 - **Table**: any 2D slice, read lazily while scrolling; copy (Ctrl+C) or export to CSV.
 - **Plot**: line plot or heatmap of any slice, with zoom, pan and PNG export.
 - **Map**: Cartopy map with coastlines and borders and a choice of projections. Works offline.
 - **Interactive map**: Leaflet map on OpenStreetMap / satellite / topo tiles (needs internet), with the value under the mouse.
 
 Sliders below the tabs step through the remaining dimensions (time, depth, …); ▶ animates.
-Regular lat/lon grids, curvilinear grids with 2D lat/lon (including WRF output) and
+Regular lat/lon grids, curvilinear grids with 2D lat/lon and
 station data (lat/lon along one dimension) can all be mapped.
 
 NetSeeDF complies with the [CF conventions](https://cfconventions.org/cf-conventions/cf-conventions.html).
+
+NetSeeDF is developed by [Rok Kuk](https://rokuk.com) and licensed under the [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html).
 
 ## Development
 
@@ -36,11 +39,10 @@ fbs doesn't cross-compile: build the Windows installer on Windows and the macOS 
 
 1. Install fbs Pro into the venv with from the fbs file, e.g.
    `uv pip install <file>`.
-2. Install PySide6
-3. `uv run fbs run` starts the app the way fbs will package it.
-4. `uv run fbs freeze` builds `target/netseedf/` (Windows) or `target/netseedf.app` (macOS).
+2. `uv run fbs run` starts the app the way fbs will package it.
+3. `uv run fbs freeze` builds `target/netseedf/` (Windows) or `target/netseedf.app` (macOS).
    Start it and open a file before building the installer.
-5`uv run fbs installer` builds `target/netseedfSetup.exe` (needs [NSIS](https://nsis.sourceforge.io)
+4. `uv run fbs installer` builds `target/netseedfSetup.exe` (needs [NSIS](https://nsis.sourceforge.io)
    on `PATH`) or `target/netseedf.dmg`.
 
 Settings live in `src/build/settings/*.json`. `extra_pyinstaller_args` there already makes
@@ -52,8 +54,7 @@ Notes:
 - The project targets Python 3.13 (`uv venv --python 3.13 && uv sync`).
 - On macOS, the build is for the Mac's own architecture (Apple Silicon or Intel). fbs doesn't
   sign or notarize; do that with `codesign` / `notarytool` before distributing.
-- `src/freeze/mac/Contents/Info.plist` registers the app for `.nc`, `.nc4`, `.cdf` and `.netcdf`
-  files in Finder's "Open With".
+- `src/freeze/mac/Contents/Info.plist` registers the app for `.nc` files in Finder's "Open With".
 
 ## Layout
 
@@ -73,3 +74,7 @@ scripts/fetch_resources.py         re-download Natural Earth data and Leaflet
 Coastlines and borders from [Natural Earth](https://www.naturalearthdata.com) (public domain).
 Interactive map by [Leaflet](https://leafletjs.com) (BSD-2-Clause); basemaps © OpenStreetMap
 contributors, Esri and OpenTopoMap. Licensed under the GNU GPL v3 (see `LICENSE`).
+
+## License
+
+Code in this repository is licensed under the [GNU General Public License v3](https://www.gnu.org/licenses/gpl-3.0.en.html). See `LICENSE` for details.

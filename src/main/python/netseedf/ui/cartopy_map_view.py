@@ -25,7 +25,7 @@ from netseedf.core.formatting import position_text, selection_text, value_text, 
 from netseedf.core.gridlines import cell_corners
 from netseedf.core.render import cell_edges
 from netseedf.core.slicing import is_finer
-from netseedf.ui.base_view import DataView, wait_cursor
+from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.mpl_canvas import MplWidget
 from netseedf.ui.style_bar import StyleBar
 
@@ -120,7 +120,7 @@ class CartopyMapView(DataView):
         self.style_bar = StyleBar()
         self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
-        for w in (QLabel("Projection:"), self.projection):
+        for w in (buddy_label("&Projection:", self.projection), self.projection):
             bar.addWidget(w)
         bar.addWidget(self.note, 1)
         self.mpl = MplWidget()

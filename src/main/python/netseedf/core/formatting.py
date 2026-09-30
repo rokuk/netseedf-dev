@@ -47,10 +47,22 @@ def is_time_like(values: np.ndarray) -> bool:
     return values.dtype == object and values.size > 0 and _is_cftime(values.flat[0])
 
 
+# Spellings of Celsius (lowercased, spaces and underscores removed) shown as °C.
+CELSIUS_UNITS = {"degreecelsius", "degreescelsius", "degc", "degreec", "degreesc", "celsius"}
+
+
+def display_units(units) -> str:
+    """Units as shown on plots and maps: degree_Celsius and friends become °C."""
+    if not units:
+        return ""
+    units = str(units)
+    return "°C" if units.lower().replace(" ", "").replace("_", "") in CELSIUS_UNITS else units
+
+
 def variable_label(da) -> str:
     """'Long name [units]' for axis and colorbar labels."""
     name = da.attrs.get("long_name") or da.attrs.get("standard_name") or str(da.name)
-    units = da.attrs.get("units")
+    units = display_units(da.attrs.get("units"))
     return f"{name} [{units}]" if units else str(name)
 
 
@@ -65,7 +77,7 @@ def index_label(da, dim, index) -> str:
     if dim in da.coords and da.coords[dim].dims == (dim,):
         coord = da.coords[dim]
         text = format_value(coord.values[index])
-        units = coord.attrs.get("units")
+        units = display_units(coord.attrs.get("units"))
         if units and not is_time_like(coord.values[:1]):
             text += f" {units}"
         return text
@@ -81,10 +93,10 @@ def position_text(lat, lon) -> str:
     ns = "N" if lat >= 0 else "S"
     lon = (lon + 180) % 360 - 180
     ew = "E" if lon >= 0 else "W"
-    return f"{abs(lat):.3f}° {ns}, {abs(lon):.3f}° {ew}"
+    return f"{abs(lat):.3f}°{ns}, {abs(lon):.3f}°{ew}"
 
 
 def value_text(da, value) -> str:
-    units = da.attrs.get("units")
+    units = display_units(da.attrs.get("units"))
     text = format_value(value)
     return f"{text} {units}" if units and text not in ("NaN", "") else text

@@ -277,12 +277,69 @@ const netseedf = (() => {
     },
   });
 
-  // A curvilinear grid with few enough cells: every cell a quadrilateral, with the
-  // same corners as the grid lines. That's slow to draw (about 7 microseconds a cell),
-  // so it isn't redrawn while dragging: a padding of half the view each way moves along.
-  const CellsOverlay = CanvasOverlay.extend({
-    options: { padding: 0.5, redrawWhileMoving: false },
+  // WebGL for the cell layers below, shared (browsers allow only a few contexts) and
+  // made on first use: {canvas, gl, program, position, color, transform}, or null
+  // where there's no WebGL.
+  let cellGL;
 
+  function cellRenderer() {
+    if (cellGL === undefined || (cellGL && cellGL.gl.isContextLost())) {
+      cellGL = makeCellRenderer();
+    }
+    return cellGL;
+  }
+
+  function makeCellRenderer() {
+    const canvas = document.createElement("canvas");
+    // Not antialiased: triangles sharing an edge then meet exactly, without seams.
+    const gl = canvas.getContext("webgl", { antialias: false, preserveDrawingBuffer: true });
+    if (!gl) {
+      return null;
+    }
+    const program = gl.createProgram();
+    for (const [type, source] of [
+      // A position is projected at zoom 0 (relative to its layer's `_ref`, see
+      // _vertices); `transform` takes it to clip space: position * xy + zw.
+      [gl.VERTEX_SHADER, `
+        attribute vec2 position;
+        attribute vec4 color;
+        uniform vec4 transform;
+        varying vec4 v_color;
+        void main() {
+          v_color = color;
+          gl_Position = vec4(position * transform.xy + transform.zw, 0.0, 1.0);
+        }`],
+      [gl.FRAGMENT_SHADER, `
+        precision mediump float;
+        varying vec4 v_color;
+        void main() {
+          gl_FragColor = v_color;
+        }`],
+    ]) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      gl.attachShader(program, shader);
+    }
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.log(`WebGL: ${gl.getProgramInfoLog(program)}`);
+      return null;
+    }
+    return {
+      canvas, gl, program,
+      position: gl.getAttribLocation(program, "position"),
+      color: gl.getAttribLocation(program, "color"),
+      transform: gl.getUniformLocation(program, "transform"),
+    };
+  }
+
+  // A curvilinear grid with few enough cells: every cell a quadrilateral, with the
+  // same corners as the grid lines. Drawn with WebGL, two triangles a cell, and copied
+  // onto the layer's canvas: that takes a millisecond or so, so it's redrawn while
+  // dragging. Without WebGL, a 2D canvas takes about 10 microseconds a cell, far too
+  // slow for that: a padding of half the view each way moves along instead.
+  const CellsOverlay = CanvasOverlay.extend({
     initialize(payload, options) {
       L.setOptions(this, options);
       const nx = payload.shape[1];
@@ -298,9 +355,117 @@ const netseedf = (() => {
           this._byColor.set(color, cells);
         }
       });
+      this._buffers = null; // see _upload
+      if (!cellRenderer()) {
+        L.setOptions(this, { padding: 0.5, redrawWhileMoving: false });
+      }
+    },
+
+    onRemove() {
+      CanvasOverlay.prototype.onRemove.call(this);
+      if (this._buffers && !this._buffers.gl.isContextLost()) {
+        this._buffers.gl.deleteBuffer(this._buffers.position);
+        this._buffers.gl.deleteBuffer(this._buffers.color);
+      }
+      this._buffers = null;
     },
 
     _draw(ctx) {
+      const r = cellRenderer();
+      if (r) {
+        this._drawGL(ctx, r);
+      } else {
+        this._draw2D(ctx);
+      }
+    },
+
+    _drawGL(ctx, r) {
+      const { canvas, gl } = r;
+      if (!this._buffers || this._buffers.gl !== gl) {
+        this._upload(gl);
+      }
+      if (!this._buffers.count) {
+        return;
+      }
+      const { width, height } = this._canvas;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      gl.viewport(0, 0, width, height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(r.program);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._buffers.position);
+      gl.enableVertexAttribArray(r.position);
+      gl.vertexAttribPointer(r.position, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._buffers.color);
+      gl.enableVertexAttribArray(r.color);
+      gl.vertexAttribPointer(r.color, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+      // Canvas pixels of a position p: ((p + ref) * scale - pixel origin - origin) * ratio.
+      const map = this._map;
+      const s = map.getZoomScale(map.getZoom(), 0) * this._ratio;
+      const o = map.getPixelOrigin().add(this._origin).multiplyBy(this._ratio);
+      const x0 = this._ref.x * s - o.x;
+      const y0 = this._ref.y * s - o.y;
+      gl.uniform4f(r.transform, 2 * s / width, -2 * s / height, 2 * x0 / width - 1, 1 - 2 * y0 / height);
+      gl.drawArrays(gl.TRIANGLES, 0, this._buffers.count);
+      ctx.drawImage(canvas, 0, 0);
+    },
+
+    // The cells' triangles into WebGL buffers of `gl`.
+    _upload(gl) {
+      const { positions, colors } = this._vertices();
+      const buffer = (data) => {
+        const b = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, b);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        return b;
+      };
+      this._buffers = {
+        gl, position: buffer(positions), color: buffer(colors), count: positions.length / 2,
+      };
+    },
+
+    // Six vertices a cell, each with its cell's colour. Positions are projected at
+    // zoom 0 and taken relative to `_ref`, a corner of the grid: as absolute ones,
+    // 32-bit floats would be off by pixels far zoomed in.
+    _vertices() {
+      const crs = this._map.options.crs;
+      const n = this._lat.length;
+      const xs = new Float64Array(n);
+      const ys = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        const p = crs.latLngToPoint(L.latLng(this._lat[i], this._lon[i]), 0);
+        xs[i] = p.x;
+        ys[i] = p.y;
+      }
+      let count = 0;
+      for (const cells of this._byColor.values()) {
+        count += cells.length;
+      }
+      const positions = new Float32Array(count * 12);
+      const colors = new Uint8Array(count * 24);
+      const first = count ? this._byColor.values().next().value[0] : 0; // corners all valid
+      this._ref = L.point(xs[first], ys[first]);
+      const row = this._nx + 1;
+      let v = 0;
+      for (const [color, cells] of this._byColor) {
+        const rgb = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16)); // "#rrggbb"
+        for (const a of cells) {
+          for (const k of [a, a + 1, a + row + 1, a, a + row + 1, a + row]) {
+            positions[2 * v] = xs[k] - this._ref.x;
+            positions[2 * v + 1] = ys[k] - this._ref.y;
+            colors.set(rgb, 4 * v);
+            colors[4 * v + 3] = 255;
+            v++;
+          }
+        }
+      }
+      return { positions, colors };
+    },
+
+    _draw2D(ctx) {
       const n = this._lat.length;
       const xs = new Float64Array(n);
       const ys = new Float64Array(n);

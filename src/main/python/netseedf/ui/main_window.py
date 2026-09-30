@@ -112,6 +112,10 @@ class MainWindow(QMainWindow):
             view_menu.addAction(self._action(self.tabs.tabText(i),
                                              lambda i=i: self.tabs.setCurrentIndex(i),
                                              QKeySequence(f"Ctrl+{i + 1}")))
+        view_menu.addSeparator()
+        view_menu.addAction(self._action("Go to &Variables", self.tree.setFocus, QKeySequence("Ctrl+0")))
+        view_menu.addAction(self._action("Go to &Dimensions", self.dims.focus_first,
+                                         QKeySequence("Ctrl+D")))
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction(self._action("&About", self._about))
 

@@ -28,7 +28,7 @@ from netseedf.core.slicing import (
     is_downward,
     is_finer,
 )
-from netseedf.ui.base_view import DataView, wait_cursor
+from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.mpl_canvas import MplWidget
 from netseedf.ui.style_bar import StyleBar
 
@@ -121,15 +121,15 @@ class PlotView(DataView):
 
     def __init__(self, state, parent=None):
         super().__init__(state, parent)
-        self.kind = QComboBox()
+        self.kind = QComboBox(accessibleName="Plot type")
         self.kind.addItems([LINE, HEATMAP])
         self.x = QComboBox(toolTip="Dimension along the x axis")
         self.y = QComboBox(toolTip="Dimension along the y axis (heatmap)")
-        self.y_label = QLabel("Y:")
+        self.y_label = buddy_label("&Y:", self.y)
         self.style_bar = StyleBar()
         self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
-        for w in (self.kind, QLabel("X:"), self.x, self.y_label, self.y):
+        for w in (self.kind, buddy_label("&X:", self.x), self.x, self.y_label, self.y):
             bar.addWidget(w)
         bar.addWidget(self.note, 1)
         self.mpl = MplWidget()

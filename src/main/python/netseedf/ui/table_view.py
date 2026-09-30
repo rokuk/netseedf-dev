@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from netseedf.core.formatting import format_value, selection_text
 from netseedf.core.slicing import coord_values, fixed_indices, lazy_slice
-from netseedf.ui.base_view import DataView, wait_cursor
+from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 
 BLOCK = 256
 MAX_BLOCKS = 64
@@ -146,11 +146,12 @@ class TableView(DataView):
         super().__init__(state, parent)
         self.rows = QComboBox(toolTip="Dimension shown down the rows")
         self.cols = QComboBox(toolTip="Dimension shown across the columns")
-        self.swap = QPushButton("Swap", toolTip="Swap rows and columns")
-        self.export = QPushButton("Export CSV…")
+        self.swap = QPushButton("&Swap", toolTip="Swap rows and columns")
+        self.export = QPushButton("&Export CSV…")
         self.info = QLabel()
         bar = QHBoxLayout()
-        for w in (QLabel("Rows:"), self.rows, QLabel("Columns:"), self.cols, self.swap):
+        for w in (buddy_label("&Rows:", self.rows), self.rows, buddy_label("&Columns:", self.cols), self.cols,
+                  self.swap):
             bar.addWidget(w)
         bar.addWidget(self.info, 1)
         bar.addWidget(self.export)
