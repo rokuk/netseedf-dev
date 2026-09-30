@@ -67,10 +67,9 @@ PROJECTIONS = {
 POLAR = {"North Polar Stereographic", "South Polar Stereographic"}
 
 
-# Coastlines and borders get more detailed as you zoom in (only bundled scales).
-_SCALER = cfeature.AdaptiveScaler("110m", (("50m", 60), ("10m", 8)))
-COASTLINES = cfeature.NaturalEarthFeature("physical", "coastline", _SCALER)
-BORDERS = cfeature.NaturalEarthFeature("cultural", "admin_0_boundary_lines_land", _SCALER)
+OUTLINE_SCALE = "50m"  # of the coastlines and borders, here and on the web map (the one bundled)
+COASTLINES = cfeature.NaturalEarthFeature("physical", "coastline", OUTLINE_SCALE)
+BORDERS = cfeature.NaturalEarthFeature("cultural", "admin_0_boundary_lines_land", OUTLINE_SCALE)
 DETAIL_DELAY_MS = 300
 
 # Drawing order: data, then the zoomed-in detail, then coastlines; stations on top.

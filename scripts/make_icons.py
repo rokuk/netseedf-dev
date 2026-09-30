@@ -45,12 +45,12 @@ def main():
     # macOS icons carry a transparent margin, otherwise they look too big in the Dock.
     mac = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     inner = round(SIZE * 0.8)
-    mac.paste(full.resize((inner, inner), Image.LANCZOS), ((SIZE - inner) // 2,) * 2)
+    mac.paste(full.resize((inner, inner), Image.Resampling.LANCZOS), ((SIZE - inner) // 2,) * 2)
     for folder, sizes in SIZES.items():
         (ICONS / folder).mkdir(parents=True, exist_ok=True)
         source = mac if folder == "mac" else full
         for s in sizes:
-            source.resize((s, s), Image.LANCZOS).save(ICONS / folder / f"{s}.png")
+            source.resize((s, s), Image.Resampling.LANCZOS).save(ICONS / folder / f"{s}.png")
     full.save(ICONS / "Icon.ico", sizes=[(s, s) for s in ICO_SIZES])
     print(f"Icons written to {ICONS}")
 

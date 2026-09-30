@@ -23,7 +23,7 @@ NATURAL_EARTH = [
     ("physical", "coastline"),
     ("cultural", "admin_0_boundary_lines_land"),
 ]
-SCALES = ["110m", "50m", "10m"]
+SCALES = ["50m"]
 
 LEAFLET_VERSION = "1.9.4"
 LEAFLET_FILES = [

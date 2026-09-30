@@ -50,13 +50,12 @@ from netseedf.core.render import (
 )
 from netseedf.core.slicing import fixed_indices, is_finer, point_series, series_frame, time_dims
 from netseedf.ui.base_view import DataView, wait_cursor
-from netseedf.ui.cartopy_map_view import NO_GEO_MESSAGE
+from netseedf.ui.cartopy_map_view import NO_GEO_MESSAGE, OUTLINE_SCALE
 from netseedf.ui.style_bar import StyleBar
 
 MAX_SIZE_REGULAR = 2000
 MAX_SIZE_CURVILINEAR = 800
 MAX_POINTS = 20_000
-OUTLINE_SCALE = "110m"  # of the coastlines and borders on the "None" basemap
 DETAIL_DELAY_MS = 150
 MAX_GRID_LINES = 400  # more than this in view and the lines are hidden
 WEB_PROFILE_NAME = "webmap"  # names the on-disk cache and storage folders

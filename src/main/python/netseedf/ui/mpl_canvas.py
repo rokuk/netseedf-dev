@@ -31,7 +31,7 @@ class MplWidget(QWidget):
 
     def _motion(self, event):
         ax = event.inaxes
-        if ax is None or event.xdata is None or ax not in self.figure.axes[:1]:
+        if ax is None or event.xdata is None or ax not in self.figure.get_axes()[:1]:
             return
         try:
             self.hover.emit(ax.format_coord(event.xdata, event.ydata))
@@ -42,7 +42,7 @@ class MplWidget(QWidget):
         """Clear the figure. Returns the previous zoom if `view_key` is unchanged."""
         previous = None
         if view_key == self._view_key and self.figure.axes:
-            ax = self.figure.axes[0]
+            ax = self.figure.get_axes()[0]
             previous = (ax.get_xlim(), ax.get_ylim())
         self._view_key = view_key
         self.figure.clear()

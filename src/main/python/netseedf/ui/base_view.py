@@ -71,8 +71,7 @@ class DataView(QWidget):
         if self.state.da is None:
             self.show_message("Open a NetCDF file and select a variable.")
             return
-        reason = self.unavailable_reason()
-        if reason:
+        if reason := self.unavailable_reason():
             self.show_message(reason)
             return
         try:
