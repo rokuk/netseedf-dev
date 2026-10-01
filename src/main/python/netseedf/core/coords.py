@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 
 import numpy as np
+import pyproj
 import xarray as xr
 
 from netseedf.core.cf import is_discrete_sampling
@@ -17,6 +18,46 @@ LON_UNITS = {"degreeseast", "degreeeast", "degreese", "degreee", "dege"}
 # Beyond this Web Mercator (and so Leaflet) can't show anything.
 MERCATOR_MAX_LAT = 85.0511
 
+# Projection coordinates (CF 4.4) in these units, as metres.
+LENGTH_UNITS = {"m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
+                "km": 1000.0, "kilometer": 1000.0, "kilometers": 1000.0, "kilometre": 1000.0,
+                "kilometres": 1000.0}
+
+
+@dataclass(frozen=True, eq=False)
+class Projection:
+    """The map projection a grid was made in (CF 5.6), with its 1D x and y in metres.
+
+    Its cells are rectangles in x and y, so they can be drawn exactly, wherever
+    they are: averaging 2D latitudes and longitudes can't, e.g. around a pole.
+    """
+
+    crs: pyproj.CRS
+    x: np.ndarray  # along the grid's second dim
+    y: np.ndarray  # along its first
+
+    def edges(self, index) -> tuple[np.ndarray, np.ndarray]:
+        """(x, y) edges of the cells drawn at the full-resolution `index` (rows, columns)."""
+        rows, cols = index
+        return _index_edges(self.x, cols), _index_edges(self.y, rows)
+
+    def centre(self) -> tuple[float, float]:
+        """(lat, lon) to centre a map on: the middle of the grid, with its y axis upright.
+
+        At a pole any longitude is the middle, so it's the one the grid has going
+        down from a north pole (up from a south pole), as on the grid itself.
+        """
+        to_lonlat = pyproj.Transformer.from_crs(self.crs, "EPSG:4326", always_xy=True)
+        x, y = (self.x[0] + self.x[-1]) / 2, (self.y[0] + self.y[-1]) / 2
+        lon, lat = to_lonlat.transform(x, y)
+        step = 0.01 * abs(self.y[-1] - self.y[0]) / max(self.y.size - 1, 1)
+        towards_pole = to_lonlat.transform(x, y + (-step if lat >= 0 else step))[0]
+        return float(lat), float(towards_pole)
+
+
+def _index_edges(full, idx):
+    return block_edges(np.arange(full.size), idx, cell_edges(full))
+
 
 @dataclass(frozen=True, eq=False)
 class GeoInfo:
@@ -29,6 +70,7 @@ class GeoInfo:
     # Cell boundaries (CF 7.1): (n, 2) for regular grids, (ny, nx, 4) for curvilinear ones
     lat_bounds: xr.DataArray | None = None
     lon_bounds: xr.DataArray | None = None
+    projection: Projection | None = None  # curvilinear grids made in a map projection
     cache: dict = field(default_factory=dict, repr=False)  # full point coordinates, see point_window
 
 
@@ -37,8 +79,9 @@ def find_geo(da: xr.DataArray, ds: xr.Dataset | None = None) -> GeoInfo | None:
     if geo is None or geo.kind == "points":
         return geo
     nv = 2 if geo.kind == "regular" else 4
+    projection = _projection(da, ds, geo.dims) if geo.kind == "curvilinear" else None
     return GeoInfo(geo.kind, geo.lat, geo.lon, geo.dims,
-                   _bounds(geo.lat, da, ds, nv), _bounds(geo.lon, da, ds, nv))
+                   _bounds(geo.lat, da, ds, nv), _bounds(geo.lon, da, ds, nv), projection)
 
 
 def _find_geo(da, ds):
@@ -86,6 +129,39 @@ def _bounds(coord, da, ds, nv):
             or bounds.dtype.kind not in "fiu":
         return None
     return bounds
+
+
+def _projection(da, ds, dims) -> Projection | None:
+    """The variable's grid mapping (CF 5.6), if it's a map projection with x and y along `dims`."""
+    name = da.attrs.get("grid_mapping") or da.encoding.get("grid_mapping")
+    if not name or ds is None:
+        return None
+    name = str(name).split(":")[0].strip()  # the first mapping of the extended form "crs: x y ..."
+    if name not in ds.variables:
+        return None
+    try:
+        crs = pyproj.CRS.from_cf(dict(ds[name].attrs))
+    except (pyproj.exceptions.CRSError, ValueError, KeyError, TypeError):
+        return None
+    if not crs.is_projected:  # e.g. rotated poles, whose coordinates are in degrees
+        return None
+    candidates = _candidates(da, ds).values()
+    y, x = (_projection_coord(candidates, dim, f"projection_{axis}_coordinate")
+            for dim, axis in zip(dims, "yx", strict=True))
+    return None if x is None or y is None else Projection(crs, x, y)
+
+
+def _projection_coord(candidates, dim, standard_name):
+    """A 1D projection coordinate along `dim`, in metres."""
+    for var in candidates:
+        if var.dims != (dim,) or var.attrs.get("standard_name") != standard_name:
+            continue
+        scale = LENGTH_UNITS.get(str(var.attrs.get("units", "m")).strip().lower())
+        values = np.asarray(var.values, dtype=float)
+        steps = np.diff(values)
+        if scale and np.isfinite(values).all() and (np.all(steps > 0) or np.all(steps < 0)):
+            return values * scale
+    return None
 
 
 def _candidates(da, ds):
@@ -143,6 +219,9 @@ class GeoGrid:
     # corners, each (ny + 1, nx + 1), longitudes without jumps.
     corners: tuple[np.ndarray, np.ndarray] | None = None
     from_bounds: bool = False  # the cell edges/corners come from bounds (CF 7.1)
+    # Curvilinear grids in a map projection (GeoInfo.projection): (x, y) edges of the
+    # drawn columns and rows in its coordinates, real cell edges like lat_edges/lon_edges.
+    xy_edges: tuple[np.ndarray, np.ndarray] | None = None
 
     @property
     def bounds(self):
@@ -188,8 +267,9 @@ def geo_grid(da: xr.DataArray, geo: GeoInfo, indices, max_size=None, window=None
         # Each vertex within 180 degrees of its cell's centre, like the unwrapped centres
         lon_b = unwrapped[..., None] + lon_diff(_bounds_slice(geo.lon_bounds, sl), raw_lon[..., None])
         corners = vertex_corners(lat, unwrapped, _bounds_slice(geo.lat_bounds, sl), lon_b)
+    xy_edges = geo.projection.edges(index) if geo.projection is not None else None
     return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360,
-                   corners=corners, from_bounds=corners is not None)
+                   corners=corners, from_bounds=corners is not None, xy_edges=xy_edges)
 
 
 def regular_edges(geo: GeoInfo, lon_0_360):

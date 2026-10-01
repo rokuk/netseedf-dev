@@ -163,7 +163,7 @@ def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
         # explicitly: matplotlib's guess at them doesn't allow for missing positions.
         x, y = cell_corners(lon), mercator_y(cell_corners(lat))
         ax.pcolormesh(x, y, np.ma.masked_invalid(values), shading="flat", **style)
-        inside = _corners_of(ok)  # the image covers the cells with positions, not the made-up ones
+        inside = corners_of(ok)  # the image covers the cells with positions, not the made-up ones
     x0, x1 = float(np.min(x[inside])), float(np.max(x[inside]))
     y0, y1 = max(float(np.min(y[inside])), mercator_y(-90)), min(float(np.max(y[inside])), mercator_y(90))
     ax.set_xlim(x0, x1)
@@ -174,7 +174,7 @@ def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
                    float(inverse_mercator_y(y1)), float(x1))
 
 
-def _corners_of(cells):
+def corners_of(cells):
     """Which corners (ny + 1, nx + 1) belong to any of the `cells` (ny, nx)."""
     corners = np.zeros((cells.shape[0] + 1, cells.shape[1] + 1), dtype=bool)
     for dj in (0, 1):

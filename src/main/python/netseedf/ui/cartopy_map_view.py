@@ -7,7 +7,9 @@ import cartopy
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import numpy as np
+from cartopy.mpl.geocollection import GeoQuadMesh
 from cartopy.mpl.gridliner import Gridliner
+from matplotlib.collections import PolyQuadMesh
 from matplotlib.image import AxesImage
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout
@@ -18,12 +20,13 @@ from netseedf.core.coords import (
     fill_missing_positions,
     geo_grid,
     geo_window,
+    lon_diff,
     with_cyclic_column,
 )
 from netseedf.core.detail import DetailTracker, padded, resolution_note
 from netseedf.core.formatting import position_text, selection_text, value_text, variable_label
 from netseedf.core.gridlines import cell_corners
-from netseedf.core.render import cell_edges
+from netseedf.core.render import cell_edges, corners_of
 from netseedf.core.slicing import is_finer
 from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.mpl_canvas import MplWidget
@@ -52,6 +55,12 @@ def _plate_carree(lon0, lat0):
     return ccrs.PlateCarree(central_longitude=lon0)
 
 
+def _lambert_conformal(lon0, lat0):
+    lat0 = float(np.clip(lat0, -80, 80))  # standard parallels beyond a pole don't work
+    return ccrs.LambertConformal(lon0, lat0,
+                                 standard_parallels=(lat0 - 5, lat0 + 5) if abs(lat0) > 6 else (30, 60))
+
+
 PROJECTIONS = {
     "Plate Carrée": _plate_carree,
     "Robinson": lambda lon0, lat0: ccrs.Robinson(central_longitude=lon0),
@@ -59,8 +68,7 @@ PROJECTIONS = {
     "Equal Earth": lambda lon0, lat0: ccrs.EqualEarth(central_longitude=lon0),
     "Mercator": lambda lon0, lat0: ccrs.Mercator(central_longitude=lon0),
     "Orthographic": lambda lon0, lat0: ccrs.Orthographic(lon0, lat0),
-    "Lambert Conformal": lambda lon0, lat0: ccrs.LambertConformal(
-        lon0, lat0, standard_parallels=(lat0 - 5, lat0 + 5) if abs(lat0) > 6 else (30, 60)),
+    "Lambert Conformal": _lambert_conformal,
     "North Polar Stereographic": lambda lon0, lat0: ccrs.NorthPolarStereo(central_longitude=lon0),
     "South Polar Stereographic": lambda lon0, lat0: ccrs.SouthPolarStereo(central_longitude=lon0),
 }
@@ -137,6 +145,7 @@ class CartopyMapView(DataView):
         self._tracker = DetailTracker()
         self._ax = self._detail = self._detail_artist = self._detail_locator = None
         self._layout = None  # what the map on screen was made for, see _layout_key
+        self._native = None  # the grid's own projection, if it has one (cartopy)
 
     def unavailable_reason(self):
         da = self.state.da
@@ -181,8 +190,16 @@ class CartopyMapView(DataView):
         self._limits = self.style_bar.limits_for(grid.values)
 
         south, west, north, east = grid.bounds
-        self._lon0 = lon0 = 0.0 if grid.is_global else round((west + east) / 2)
-        lat0 = float(np.clip((south + north) / 2, -80, 80))
+        lon0 = 0.0 if grid.is_global else round((west + east) / 2)
+        lat0 = (south + north) / 2
+        self._native = None
+        if geo.projection is not None:
+            # Centred like the grid itself, e.g. on the pole of a polar grid (whose
+            # longitudes span the globe), in the longitudes the grid uses.
+            lat0, centre_lon = geo.projection.centre()
+            lon0 = lon0 + float(lon_diff(centre_lon, lon0))
+            self._native = ccrs.Projection(geo.projection.crs)
+        self._lon0 = lon0
         proj = PROJECTIONS[name](lon0, lat0)
         data_crs = ccrs.PlateCarree()
 
@@ -247,7 +264,7 @@ class CartopyMapView(DataView):
             self._colorbar.update_normal(self._artist)
         else:
             values = drawn.values
-            if grid.kind == "curvilinear" and not grid.from_bounds:
+            if grid.kind == "curvilinear" and not grid.from_bounds and grid.xy_edges is None:
                 values = fill_missing_positions(grid.lat, grid.lon, values)[2]
             values = np.ma.masked_invalid(values)
             if isinstance(self._artist, AxesImage):
@@ -274,6 +291,9 @@ class CartopyMapView(DataView):
                               s=18, edgecolors="black", linewidths=0.3, transform=ccrs.PlateCarree(),
                               zorder=Z_POINTS + 0.1 * detail)
         zorder = Z_DETAIL if detail else Z_DATA
+        if grid.xy_edges is not None:  # cells as rectangles in the grid's own projection
+            return _native_mesh(ax, *grid.xy_edges, values, self._native,
+                                cmap=cmap, vmin=vmin, vmax=vmax, zorder=zorder)
         if grid.from_bounds:  # cells as given by the file's bounds (CF 7.1)
             lat, lon = (grid.lat_edges, grid.lon_edges) if grid.kind == "regular" else grid.corners
             return ax.pcolormesh(lon, lat, values, cmap=cmap, vmin=vmin, vmax=vmax, shading="flat",
@@ -361,6 +381,52 @@ class CartopyMapView(DataView):
         extent = (max(west - margin, -180), min(east + margin, 180),
                   max(south - margin, -90), min(north + margin, 90))
         ax.set_extent(extent, crs=ccrs.PlateCarree(central_longitude=lon0))
+
+
+def _native_mesh(ax, x_edges, y_edges, values, crs, **style):
+    """Cells that are rectangles in `crs`, a projection of the data's own, on the map.
+
+    Cells crossing the map's edge (e.g. the antimeridian) would be smeared across
+    it. Cartopy draws those separately, as polygons cut at the edge, but only for
+    data in projections it knows to wrap (Plate Carrée). This does the same here,
+    the way cartopy's own mesh keeps them: split off, with its values shared.
+    """
+    mesh = ax.pcolormesh(x_edges, y_edges, values, shading="flat", transform=crs, **style)
+    x, y = np.meshgrid(x_edges, y_edges)
+    xy = ax.projection.transform_points(crs, x, y)
+    xs, ys = xy[..., 0], xy[..., 1]
+    (x0, x1), (y0, y1) = sorted(ax.projection.x_limits), sorted(ax.projection.y_limits)
+    limit = (x1 - x0) / (2 * np.sqrt(2))  # cartopy's
+    with np.errstate(invalid="ignore"):
+        long = ~((np.hypot(xs[1:, 1:] - xs[:-1, :-1], ys[1:, 1:] - ys[:-1, :-1]) <= limit)
+                 & (np.hypot(xs[1:, :-1] - xs[:-1, 1:], ys[1:, :-1] - ys[:-1, 1:]) <= limit))
+        # Corners off the map, e.g. near a pole that's at infinity: their cells can't be cut.
+        off_map = np.isfinite(xs) & ~((x0 <= xs) & (xs <= x1) & (y0 <= ys) & (ys <= y1))
+    hidden = ~np.isfinite(xs)  # e.g. behind the globe: such cells aren't drawn at all
+    wrapped = long & ~(hidden[:-1, :-1] & hidden[1:, :-1] & hidden[:-1, 1:] & hidden[1:, 1:])
+    if not wrapped.any() or not isinstance(mesh, GeoQuadMesh):
+        return mesh
+    # Cells around a pole, cut, can turn inside out and cover the whole map. Where a
+    # pole is a line (cylindrical projections) they'd only be that line anyway.
+    for px, py in crs.transform_points(ccrs.Geodetic(), np.zeros(2), np.array([90.0, -90.0]))[:, :2]:
+        if np.isfinite(px) and np.isfinite(py):
+            off_map |= corners_of(_between(y_edges, py)[:, None] & _between(x_edges, px)[None, :])
+    # The mesh leaves out all the wrapped cells; the polygons draw those that can be cut.
+    corners = np.ma.array(np.dstack([x, y]), mask=np.repeat(off_map[..., None], 2, axis=-1))
+    missing = np.ma.getmaskarray(values)
+    fix = PolyQuadMesh(corners, array=np.ma.array(values, mask=~wrapped | missing),
+                       cmap=mesh.cmap, norm=mesh.norm, transform=crs, zorder=mesh.zorder - 0.1,
+                       edgecolors="face", linewidths=0, snap=False)
+    mesh.set_array(np.ma.array(values, mask=wrapped | missing))
+    mesh._wrapped_mask, mesh._wrapped_collection_fix = wrapped, fix  # what GeoQuadMesh uses
+    ax.add_collection(fix, autolim=False)
+    return mesh
+
+
+def _between(edges, q):
+    """Which of the cells between `edges` (ascending or descending) hold or touch `q`."""
+    lo, hi = np.minimum(edges[:-1], edges[1:]), np.maximum(edges[:-1], edges[1:])
+    return (lo <= q) & (q <= hi)
 
 
 def _outside_layout(artist):

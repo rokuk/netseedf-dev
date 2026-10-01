@@ -176,3 +176,56 @@ def test_window_within_stored_longitudes_is_a_range(ds):
     coarse = geo_grid(d["sst"], geo, {}, max_size=45)
     window = geo_window(geo, coarse, (40, 30, 60, 60))
     assert isinstance(window["lon"], tuple) and isinstance(window["lat"], tuple)
+
+
+def test_grid_mapping_gives_projection(ds):
+    d = ds("polar_projected.nc")
+    geo = find_geo(d["ice"], d)
+    assert geo.kind == "curvilinear"
+    assert geo.projection is not None and geo.projection.crs.is_projected
+    np.testing.assert_allclose(geo.projection.x, d["x"].values * 1000)  # km to metres
+    np.testing.assert_allclose(geo.projection.y, d["y"].values * 1000)
+
+
+def test_projected_cell_edges(ds):
+    d = ds("polar_projected.nc")
+    geo = find_geo(d["ice"], d)
+    grid = geo_grid(d["ice"], geo, {"time": 0})
+    x_edges, y_edges = grid.xy_edges
+    np.testing.assert_allclose(x_edges, np.arange(-30, 31) * 200_000.0)
+    np.testing.assert_allclose(y_edges, np.arange(30, -31, -1) * 200_000.0)  # descending, like y
+    # Thinned out, the drawn cells still have real cell edges, and cover the whole grid.
+    coarse = geo_grid(d["ice"], geo, {"time": 0}, max_size=20)
+    assert coarse.slice.downsampled
+    cx, cy = coarse.xy_edges
+    assert (cx.size, cy.size) == (coarse.values.shape[1] + 1, coarse.values.shape[0] + 1)
+    assert set(cx) <= set(x_edges) and set(cy) <= set(y_edges)
+    assert (cx[0], cx[-1], cy[0], cy[-1]) == (x_edges[0], x_edges[-1], y_edges[0], y_edges[-1])
+
+
+def test_projected_grid_centred_on_its_pole(ds):
+    d = ds("polar_projected.nc")
+    lat, lon = find_geo(d["ice"], d).projection.centre()
+    assert lat == pytest.approx(90)
+    assert lon == pytest.approx(0, abs=1e-6)  # the meridian going down from the pole
+
+
+@pytest.mark.parametrize("change", [
+    {"grid_mapping_name": "latitude_longitude"},  # not a projection: coordinates in degrees
+    {"grid_mapping_name": "no_such_projection"},
+])
+def test_no_projection_without_usable_mapping(ds, change):
+    d = ds("polar_projected.nc").copy()
+    d["crs"].attrs = change
+    geo = find_geo(d["ice"], d)
+    assert geo.kind == "curvilinear" and geo.projection is None
+    assert geo_grid(d["ice"], geo, {"time": 0}).xy_edges is None
+
+
+def test_no_projection_without_projection_coordinates(ds):
+    d = ds("polar_projected.nc").copy()
+    d["x"].attrs["units"] = "furlong"
+    assert find_geo(d["ice"], d).projection is None
+    d = ds("polar_projected.nc").copy()
+    del d["ice"].attrs["grid_mapping"]
+    assert find_geo(d["ice"], d).projection is None

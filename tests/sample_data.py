@@ -10,6 +10,7 @@ from pathlib import Path
 import netCDF4
 import numpy as np
 import pandas as pd
+import pyproj
 import xarray as xr
 
 RNG = np.random.default_rng(42)
@@ -284,6 +285,41 @@ def trajectories(path):
             v[:] = values
 
 
+def polar_projected(path):
+    """North polar Lambert azimuthal grid (like EASE2), x/y in km, with 2D lat/lon and a
+    grid mapping (CF 5.6). Its longitudes go all the way round the pole."""
+    step = 200.0  # km
+    x = np.arange(-30, 30) * step + step / 2  # the pole at the corner of the middle four cells
+    y = x[::-1]  # north to south, as such grids usually are
+    mapping = {"grid_mapping_name": "lambert_azimuthal_equal_area", "longitude_of_projection_origin": 0.0,
+               "latitude_of_projection_origin": 90.0, "false_easting": 0.0, "false_northing": 0.0,
+               "semi_major_axis": 6378137.0, "inverse_flattening": 298.257223563}
+    to_lonlat = pyproj.Transformer.from_crs(pyproj.CRS.from_cf(mapping), "EPSG:4326", always_xy=True)
+    lon, lat = to_lonlat.transform(*np.meshgrid(x * 1000, y * 1000))
+    data = np.stack([_field(lat, lon, t) for t in range(2)]).astype("float32")
+    data[:, 5:15, 40:55] = np.nan  # "land"
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.Conventions = "CF-1.12"
+        for name in ("time", "y", "x"):
+            nc.createDimension(name, {"time": None, "y": y.size, "x": x.size}[name])
+        crs = nc.createVariable("crs", "i4")
+        crs.setncatts(mapping)
+        t = nc.createVariable("time", "f8", ("time",))
+        t.units, t.standard_name = "days since 2020-09-01", "time"
+        t[:] = [0, 1]
+        for name, values, axis in (("x", x, "x"), ("y", y, "y")):
+            v = nc.createVariable(name, "f8", (name,))
+            v.units, v.standard_name = "km", f"projection_{axis}_coordinate"
+            v[:] = values
+        for name, values, units in (("lat", lat, "degrees_north"), ("lon", lon, "degrees_east")):
+            v = nc.createVariable(name, "f4", ("y", "x"))
+            v.units, v.standard_name = units, {"lat": "latitude", "lon": "longitude"}[name]
+            v[:] = values
+        v = nc.createVariable("ice", "f4", ("time", "y", "x"), fill_value=np.float32(np.nan))
+        v.units, v.grid_mapping, v.coordinates = "K", "crs", "time lat lon"
+        v[:] = data
+
+
 WRITERS = {
     "regular_global.nc": regular_global,
     "curvilinear.nc": curvilinear,
@@ -299,6 +335,7 @@ WRITERS = {
     "wrf_like.nc": wrf_like,
     "bounded.nc": bounded,
     "trajectories.nc": trajectories,
+    "polar_projected.nc": polar_projected,
 }
 
 

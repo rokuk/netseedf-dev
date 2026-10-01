@@ -256,6 +256,21 @@ def test_satellite_image_with_missing_positions_is_drawn(testfile):
     assert west - 3 < overlay.west < west and east < overlay.east < east + 3
 
 
+def test_ease2_grid_uses_its_projection(testfile):
+    """OSI SAF ice concentration: EASE2 north (Lambert azimuthal) with x/y in km (CF 5.6)."""
+    f = testfile("ice_conc_nh_ease2-250_cdr-v3p0-amsr_202009011200.nc")
+    da = f.variable("/", "ice_conc")
+    geo = find_geo(da, f.dataset())
+    assert geo.projection is not None
+    assert geo.projection.crs.to_cf()["grid_mapping_name"] == "lambert_azimuthal_equal_area"
+    grid = geo_grid(da, geo, {})
+    x_edges, y_edges = grid.xy_edges
+    np.testing.assert_allclose(x_edges[[0, -1]], [-5_400_000, 5_400_000])  # 432 cells of 25 km
+    np.testing.assert_allclose(y_edges[[0, -1]], [5_400_000, -5_400_000])
+    lat, lon = geo.projection.centre()
+    assert lat == pytest.approx(90) and lon == pytest.approx(0, abs=1e-6)
+
+
 def test_infinite_valid_range_masks_nothing(testfile):
     o3 = testfile("OMI-Aura_L2-example.nc").variable("/", "ColumnAmountO3")
     assert np.isfinite(o3.values).all()

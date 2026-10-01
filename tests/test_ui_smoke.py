@@ -50,7 +50,7 @@ def _errors(w):
 @pytest.mark.parametrize("name", ["regular_global.nc", "curvilinear.nc", "timeseries.nc", "four_d.nc",
                                   "groups.nc", "netcdf3.nc", "packed.nc", "noleap.nc", "bad_time.nc",
                                   "points.nc", "pacific.nc", "wrf_like.nc", "bounded.nc",
-                                  "trajectories.nc"])
+                                  "trajectories.nc", "polar_projected.nc"])
 def test_every_variable_in_every_tab(window, samples, name):
     window.open_path(samples[name])
     file_id = window.tree.current_file_id()
@@ -249,6 +249,35 @@ def test_map_loads_detail_when_zoomed(window, samples, monkeypatch):
     x, y = view._ax.projection.transform_point(10, 45, ccrs.PlateCarree())
     expected = float(sst.isel(time=0).sel(lat=45, lon=10))
     assert f"sst = {expected:.6g} K" in view._ax.format_coord(x, y)
+
+
+def test_map_draws_projected_grid_in_its_projection(window, samples):
+    import cartopy.crs as ccrs
+    from matplotlib.collections import PolyQuadMesh
+
+    window.open_path(samples["polar_projected.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view, ice = window.map, window.state.da
+    view.projection.setCurrentText("Orthographic")
+    params = view._ax.projection.proj4_params
+    assert (params["lat_0"], params["lon_0"]) == pytest.approx((90, 0))  # looking down on the pole
+    assert not hasattr(view._artist, "_wrapped_collection_fix")  # nothing crosses an edge there
+
+    # In Plate Carrée the cells across the antimeridian are cut there, not smeared across the map.
+    view.projection.setCurrentText("Plate Carrée")
+    artist = view._artist
+    fix = artist._wrapped_collection_fix
+    assert isinstance(fix, PolyQuadMesh) and fix.axes is view._ax
+    assert artist._wrapped_mask.any() and not artist._wrapped_mask.all()
+    view.mpl.canvas.draw()
+
+    window.state.set_indices({"time": 1})  # new values go into both parts of the same mesh
+    assert view._artist is artist
+    shown = np.ma.filled(artist.get_array(), np.nan)
+    np.testing.assert_allclose(shown, ice.isel(time=1).values)
+    x, y = view._ax.projection.transform_point(30, 70, ccrs.PlateCarree())
+    assert "ice = " in view._ax.format_coord(x, y)
+    assert _errors(window) == {}
 
 
 def test_map_detail_for_stations(window, samples, monkeypatch):
