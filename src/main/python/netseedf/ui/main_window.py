@@ -123,7 +123,8 @@ class MainWindow(QMainWindow):
         action = QAction(text, self)
         if shortcut is not None:
             action.setShortcut(shortcut)
-        action.triggered.connect(slot)
+        # Drop the `checked` argument: it would otherwise override lambda defaults like p=path.
+        action.triggered.connect(lambda: slot())
         return action
 
     def _fill_recent_menu(self):
@@ -151,8 +152,9 @@ class MainWindow(QMainWindow):
             <p><a href="{homepage}">{homepage}</a></p>
             <p>License: GNU General Public License v3.0.<br>
             Coastlines and borders: Natural Earth (public domain).<br>
-            Interactive map: Leaflet; basemaps &copy; OpenStreetMap contributors, Esri,
-            OpenTopoMap.</p>""")
+            Interactive map: Leaflet; basemaps &copy; OpenStreetMap contributors,
+            OpenTopoMap; Sentinel-2 cloudless by EOX IT Services GmbH (contains modified
+            Copernicus Sentinel data 2016, CC BY 4.0).</p>""")
 
     # --- files ------------------------------------------------------------
 

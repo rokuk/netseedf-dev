@@ -28,9 +28,10 @@ from netseedf.core.slicing import (
     is_downward,
     is_finer,
 )
+from netseedf.core.style import widen
 from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.mpl_canvas import MplWidget
-from netseedf.ui.style_bar import StyleBar
+from netseedf.ui.style_bar import RangeBar, StyleBar
 
 LINE = "Line"
 HEATMAP = "Heatmap"
@@ -127,6 +128,8 @@ class PlotView(DataView):
         self.y = QComboBox(toolTip="Dimension along the y axis (heatmap)")
         self.y_label = buddy_label("&Y:", self.y)
         self.style_bar = StyleBar()
+        self.y_range = RangeBar("Y li&mits:", "Auto&scale",
+                                "Y axis from each slice's smallest to largest value in view")
         self.note = QLabel(minimumWidth=1)  # a long note mustn't widen the window
         bar = QHBoxLayout()
         for w in (self.kind, buddy_label("&X:", self.x), self.x, self.y_label, self.y):
@@ -134,6 +137,7 @@ class PlotView(DataView):
         bar.addWidget(self.note, 1)
         self.mpl = MplWidget()
         self.mpl.add_to_toolbar_row(self.style_bar)
+        self.mpl.add_to_toolbar_row(self.y_range)
         self.mpl.hover.connect(self.status)
         layout = QVBoxLayout(self.body)
         layout.setContentsMargins(4, 4, 4, 0)
@@ -143,6 +147,7 @@ class PlotView(DataView):
         for combo in (self.kind, self.x, self.y):
             combo.currentTextChanged.connect(self._controls_changed)
         self.style_bar.changed.connect(self._restyle)
+        self.y_range.changed.connect(self._restyle)
         self._detail_timer = QTimer(self, singleShot=True, interval=DETAIL_DELAY_MS)
         self._detail_timer.timeout.connect(self._update_detail)
         self._tracker = DetailTracker()
@@ -186,6 +191,7 @@ class PlotView(DataView):
                 self.x.setCurrentText(_longest_dim(da))
         self._show_controls()
         self.style_bar.reset_range()
+        self.y_range.reset()
         self.mpl.reset()
         self._updating = False
 
@@ -193,6 +199,8 @@ class PlotView(DataView):
         heatmap = self.kind.currentText() == HEATMAP
         for w in (self.y_label, self.y, self.style_bar):
             w.setVisible(heatmap)
+        da = self.state.da
+        self.y_range.setVisible(not heatmap and da is not None and da.dtype.kind in "fiub")
 
     def _controls_changed(self):
         if self._updating:
@@ -220,6 +228,9 @@ class PlotView(DataView):
         # Zooming or panning (including the zoom kept from before) may call for more detail.
         for event in ("xlim_changed", "ylim_changed"):
             self._ax.callbacks.connect(event, lambda _ax: self._detail_timer.start())
+        if self.kind.currentText() == LINE:  # the boxes follow zooming and panning
+            self._ax.callbacks.connect("ylim_changed", lambda ax: self.y_range.show_range(ax.get_ylim()))
+            self.y_range.show_range(self._ax.get_ylim())
         self._update_detail()  # now, so a kept zoom never shows the overview alone
 
     def _title(self, sl):
@@ -266,8 +277,32 @@ class PlotView(DataView):
             return (f"{axis.dim} = {axis.text(self._line_index[k])}   "
                     f"{da.name} = {value_text(da, self._line_y[k])}")
         ax.format_coord = format_coord
+        if not self.y_range.auto.isChecked():
+            # The typed range, along with the zoom along x if there's one to keep.
+            xlim = previous[0] if previous else ax.get_xlim()
+            previous = (xlim, widen(*self.y_range.typed()))
+        elif previous:
+            # Keep the zoom along x, but fit y to this slice: load the detail for the kept
+            # x range first, so the fit sees every value that will be drawn.
+            ax.set_xlim(previous[0])
+            self._line_detail()
+            previous = (previous[0], self._fitted_ylim(previous[0], previous[1]))
         self._update_note()
         self.mpl.finish(ax, previous)
+
+    def _fitted_ylim(self, xlim, fallback):
+        """Y limits spanning the line's values within `xlim` (with matplotlib's margins)."""
+        y = as_float(np.asarray(self._line_y))
+        if y is None:  # e.g. dates, left as they were
+            return fallback
+        x = self._xa.pos(self._line_index)
+        lo, hi = sorted(xlim)
+        y = y[(x >= lo) & (x <= hi) & np.isfinite(y)]
+        if not y.size:
+            return fallback
+        y0, y1 = float(y.min()), float(y.max())
+        pad = (y1 - y0) * self._ax.margins()[1] or abs(y0) * 0.05 or 1.0  # a flat line too
+        return y0 - pad, y1 + pad
 
     def _line_detail(self):
         da, axis, base = self.state.da, self._xa, self._base_slice

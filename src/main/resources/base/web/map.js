@@ -22,11 +22,14 @@ const netseedf = (() => {
     "OpenStreetMap": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19, attribution: osmAttribution,
     }),
-    "Esri World Imagery": L.tileLayer(
-      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-        maxZoom: 19,
-        attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, " +
-          "and the GIS User Community",
+    // The 2016 mosaic: CC BY 4.0 (later years are non-commercial only). 10 m pixels,
+    // so tiles past zoom 15 would only be upsampled: Leaflet scales those up itself.
+    "Sentinel-2 cloudless": L.tileLayer(
+      "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/g/{z}/{y}/{x}.jpg", {
+        maxZoom: 19, maxNativeZoom: 15,
+        attribution: '<a href="https://s2maps.eu">Sentinel-2 cloudless</a> by ' +
+          '<a href="https://eox.at">EOX IT Services GmbH</a> (Contains modified Copernicus ' +
+          "Sentinel data 2016)",
       }),
     "OpenTopoMap": L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
       maxZoom: 17,
@@ -71,8 +74,13 @@ const netseedf = (() => {
   // of its size) on each side. With `redrawWhileMoving` it's redrawn every frame of a
   // drag; otherwise it moves along with the map and is redrawn when the move ends
   // (or when dragged past the padding): for layers too slow to draw every frame.
+  // The map wraps around (and jumps by 360° when panned across the antimeridian), so
+  // the data is drawn on every copy of the world on the canvas: subclasses set
+  // `_lonRange` (its west and east) and draw with `_shift` added to longitudes.
   const CanvasOverlay = L.Layer.extend({
     options: { padding: 0, redrawWhileMoving: true },
+    _lonRange: null,
+    _shift: 0,
 
     onAdd() {
       this._canvas = L.DomUtil.create("canvas", "data-overlay leaflet-zoom-animated");
@@ -169,13 +177,32 @@ const netseedf = (() => {
         ctx.rect(...this._rect(clip));
         ctx.clip();
       }
-      this._draw(ctx);
+      for (const shift of this._shifts()) {
+        this._shift = shift;
+        this._draw(ctx);
+      }
+      this._shift = 0;
       if (clip) {
         ctx.restore();
       }
       if (this._hole) {
         ctx.clearRect(...this._rect(this._hole));
       }
+    },
+
+    // Multiples of 360° that put a copy of the data on the canvas.
+    _shifts() {
+      if (!this._lonRange) {
+        return [0];
+      }
+      const [west, east] = this._lonRange;
+      const left = this._map.layerPointToLatLng(this._origin).lng;
+      const right = this._map.layerPointToLatLng(this._drawn.max).lng;
+      const shifts = [];
+      for (let k = Math.ceil((left - east) / 360); k <= Math.floor((right - west) / 360); k++) {
+        shifts.push(360 * k);
+      }
+      return shifts;
     },
 
     setHole(bounds) {
@@ -195,9 +222,9 @@ const netseedf = (() => {
       return [x, y, Math.round(se.x * this._ratio) - x, Math.round(se.y * this._ratio) - y];
     },
 
-    // Canvas pixels of a position.
+    // Canvas pixels of a position (on the copy of the world being drawn).
     _x(lon, lat) {
-      return (this._map.latLngToLayerPoint([lat, lon]).x - this._origin.x) * this._ratio;
+      return (this._map.latLngToLayerPoint([lat, lon + this._shift]).x - this._origin.x) * this._ratio;
     },
 
     _y(lat, lon) {
@@ -219,10 +246,13 @@ const netseedf = (() => {
       L.setOptions(this, options);
       this._rows = payload.rows; // latitude edges, north to south
       this._cols = payload.cols; // longitude edges, west to east
+      this._lonRange = [this._cols[0], this._cols[this._cols.length - 1]];
       this._strip = document.createElement("canvas"); // see _draw
       this._image = new Image();
       this._image.onload = () => this._redraw();
       this._image.src = payload.url;
+      // Decoded before the layer is shown (see setData): no blank frame in between.
+      this.ready = this._image.decode().catch(() => {});
     },
 
     _draw(ctx) {
@@ -346,6 +376,7 @@ const netseedf = (() => {
       this._nx = nx;
       this._lat = payload.lat; // corners, (ny + 1) x (nx + 1)
       this._lon = payload.lon;
+      this._lonRange = [payload.bounds[0][1], payload.bounds[1][1]];
       // Cells by colour: one path to fill per colour, not per cell.
       this._byColor = new Map();
       payload.colors.forEach((color, k) => {
@@ -406,7 +437,9 @@ const netseedf = (() => {
       const map = this._map;
       const s = map.getZoomScale(map.getZoom(), 0) * this._ratio;
       const o = map.getPixelOrigin().add(this._origin).multiplyBy(this._ratio);
-      const x0 = this._ref.x * s - o.x;
+      const crs = map.options.crs;
+      const shift = crs.latLngToPoint(L.latLng(0, this._shift), 0).x - crs.latLngToPoint(L.latLng(0, 0), 0).x;
+      const x0 = (this._ref.x + shift) * s - o.x;
       const y0 = this._ref.y * s - o.y;
       gl.uniform4f(r.transform, 2 * s / width, -2 * s / height, 2 * x0 / width - 1, 1 - 2 * y0 / height);
       gl.drawArrays(gl.TRIANGLES, 0, this._buffers.count);
@@ -500,9 +533,12 @@ const netseedf = (() => {
     initialize(payload, options) {
       L.setOptions(this, options);
       this._bounds = L.latLngBounds(payload.bounds);
+      this._lonRange = [this._bounds.getWest(), this._bounds.getEast()];
       this._image = new Image();
       this._image.onload = () => this._redraw();
       this._image.src = payload.url;
+      // Decoded before the layer is shown (see setData): no blank frame in between.
+      this.ready = this._image.decode().catch(() => {});
     },
 
     _draw(ctx) {
@@ -510,10 +546,9 @@ const netseedf = (() => {
       if (!image.complete || !image.naturalWidth) {
         return;
       }
-      const nw = this._map.latLngToLayerPoint(this._bounds.getNorthWest()).subtract(this._origin);
-      const se = this._map.latLngToLayerPoint(this._bounds.getSouthEast()).subtract(this._origin);
-      const [x, y] = [nw.x * this._ratio, nw.y * this._ratio];
-      const [w, h] = [(se.x - nw.x) * this._ratio, (se.y - nw.y) * this._ratio];
+      const b = this._bounds;
+      const [x, y] = [this._x(b.getWest(), b.getNorth()), this._y(b.getNorth(), b.getWest())];
+      const [w, h] = [this._x(b.getEast(), b.getSouth()) - x, this._y(b.getSouth(), b.getEast()) - y];
       // Only the part on the canvas: far zoomed in, the whole image would be huge.
       const x0 = Math.max(x, 0);
       const y0 = Math.max(y, 0);
@@ -545,10 +580,12 @@ const netseedf = (() => {
       return new ImageCanvasOverlay(payload, options);
     }
     if (payload.kind === "points") {
-      return L.layerGroup(payload.points.map(([lat, lon, color]) => L.circleMarker([lat, lon], {
-        radius: 5, weight: 0.6, color: "#222", opacity,
-        fillColor: color || "#000", fillOpacity: color ? opacity : 0, missing: !color,
-      })));
+      // On the neighbouring copies of the world too, for panning across the antimeridian.
+      return L.layerGroup([-360, 0, 360].flatMap((shift) => payload.points.map(([lat, lon, color]) =>
+        L.circleMarker([lat, lon + shift], {
+          radius: 5, weight: 0.6, color: "#222", opacity,
+          fillColor: color || "#000", fillOpacity: color ? opacity : 0, missing: !color,
+        }))));
     }
     return null;
   }
@@ -582,22 +619,62 @@ const netseedf = (() => {
     layerOpacity(detailLayer, covered ? opacity : 0);
   }
 
+  // Resolves once a layer can be drawn in full (its image decoded).
+  function whenReady(layer) {
+    return (layer && layer.ready) || Promise.resolve();
+  }
+
+  // New data (e.g. after moving a slider) replaces the old only once it's ready to
+  // draw, together with its detail when one follows (`awaitDetail`): the old layers
+  // stay up until then, rather than leaving the map blank or coarse for a moment.
+  let staged = null; // {payload, data, detail, covers, detailArrived}
+  let detailToken = 0; // the latest setDetail, or setData (which drops pending details)
+
   function setData(payload) {
+    detailToken++;
+    let arrived;
+    const s = staged = {
+      payload, data: makeLayer(payload), detail: null, covers: null,
+      detailArrived: new Promise((resolve) => { arrived = resolve; }),
+    };
+    s.arrived = arrived;
+    if (!payload.awaitDetail) {
+      arrived();
+    } else {
+      setTimeout(arrived, 1000); // in case it never comes
+    }
+    Promise.all([whenReady(s.data), s.detailArrived]).then(() => commit(s));
+  }
+
+  function commit(s) {
+    if (staged !== s) {
+      return; // newer data came along
+    }
+    staged = null;
     for (const layer of [dataLayer, detailLayer]) {
       if (layer) {
         map.removeLayer(layer);
       }
     }
-    detailLayer = detailCovers = null;
-    dataLayer = makeLayer(payload);
-    if (dataLayer) {
-      dataLayer.addTo(map);
+    dataLayer = s.data;
+    detailLayer = s.detail;
+    detailCovers = s.covers;
+    for (const layer of [dataLayer, detailLayer]) {
+      if (layer) {
+        layer.addTo(map);
+      }
     }
+    updateOverview();
+    const payload = s.payload;
     let bounds = null;
     if (payload.kind === "image" || payload.kind === "grid" || payload.kind === "cells") {
       bounds = L.latLngBounds(payload.bounds);
     } else if (payload.kind === "points" && payload.points.length) {
       bounds = L.latLngBounds(payload.points.map(([lat, lon]) => [lat, lon]));
+    }
+    if (bounds && bounds.getEast() - bounds.getWest() > 300) {
+      // Global: centred on Greenwich, also when stored as 0..360.
+      bounds = L.latLngBounds([[bounds.getSouth(), -180], [bounds.getNorth(), 180]]);
     }
     if (payload.fit && bounds) {
       map.fitBounds(bounds, { padding: [20, 20], maxZoom: 12 });
@@ -606,16 +683,31 @@ const netseedf = (() => {
     refreshPopup();
   }
 
+  // The old detail also stays up until the new one is ready to draw.
   function setDetail(payload) {
-    if (detailLayer) {
-      map.removeLayer(detailLayer);
-    }
-    detailLayer = payload ? makeLayer(payload) : null;
-    detailCovers = payload ? L.latLngBounds(payload.covers) : null;
-    if (detailLayer) {
-      detailLayer.addTo(map);
-    }
-    updateOverview();
+    const token = ++detailToken;
+    const layer = payload ? makeLayer(payload) : null;
+    const covers = payload ? L.latLngBounds(payload.covers) : null;
+    whenReady(layer).then(() => {
+      if (token !== detailToken) {
+        return; // superseded
+      }
+      if (staged) { // goes up with the data it belongs to
+        staged.detail = layer;
+        staged.covers = covers;
+        staged.arrived();
+        return;
+      }
+      if (detailLayer) {
+        map.removeLayer(detailLayer);
+      }
+      detailLayer = layer;
+      detailCovers = covers;
+      if (detailLayer) {
+        detailLayer.addTo(map);
+      }
+      updateOverview();
+    });
   }
 
   function setLegend(l) {

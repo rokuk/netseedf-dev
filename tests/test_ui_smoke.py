@@ -12,7 +12,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 from PySide6 import QtWebEngineWidgets  # noqa: E402, F401 (must precede the QApplication)
-from PySide6.QtCore import QSettings  # noqa: E402
+from PySide6.QtCore import QSettings, QUrl  # noqa: E402
 from PySide6.QtGui import QKeySequence  # noqa: E402
 from PySide6.QtWidgets import QAbstractButton, QFileDialog, QLabel  # noqa: E402
 
@@ -157,6 +157,17 @@ def test_opening_the_same_file_twice_selects_it(window, samples):
     assert window.tree.topLevelItemCount() == 1
 
 
+def test_open_recent_and_view_shortcuts(window, samples):
+    window.open_path(samples["packed.nc"])
+    window.close_current_file()
+    window.recent_menu.aboutToShow.emit()
+    window.recent_menu.actions()[0].trigger()
+    assert window.tree.topLevelItemCount() == 1
+    view_menu = window.menuBar().actions()[1].menu()
+    view_menu.actions()[2].trigger()
+    assert window.tabs.currentIndex() == 2
+
+
 def test_close_file(window, samples):
     window.open_path(samples["packed.nc"])
     window.close_current_file()
@@ -230,6 +241,45 @@ def test_line_plot_loads_detail_when_zoomed(window, samples, monkeypatch):
     assert day in shown and day % 8  # a day the overview skips
     assert f"discharge = {float(q[day]):.6g}" in view._ax.format_coord(
         mdates.date2num(np.datetime64("2023-05-10")), 0)
+
+
+def test_line_plot_y_range(window, samples):
+    window.open_path(samples["four_d.nc"])
+    window.tabs.setCurrentWidget(window.plot)
+    view = window.plot
+    bar = view.y_range
+    assert not bar.isVisible()  # heatmap first
+    view.kind.setCurrentText("Line")
+    view.x.setCurrentText("lon")
+    assert bar.isVisible() and bar.auto.isChecked()
+
+    def y_range():  # of the values in view
+        x = view._xa.pos(view._line_index)
+        y = view._line_y[(x >= -10) & (x <= 10)]
+        return float(y.min()), float(y.max())
+
+    view._ax.set_xlim(-10, 10)  # a zoom along x is kept
+    window.state.set_indices({"lat": 29})  # 0.6 psu saltier than the first row
+    lo, hi = view._ax.get_ylim()
+    assert tuple(view._ax.get_xlim()) == (-10, 10)
+    assert lo <= y_range()[0] and hi >= y_range()[1] and hi - lo < 0.3
+    assert float(bar.vmin.text()) == pytest.approx(lo, rel=1e-5)  # the boxes show the axis
+
+    bar.vmin.setText("30")
+    bar.vmin.setModified(True)  # as if typed
+    bar.vmin.editingFinished.emit()
+    assert not bar.auto.isChecked()
+    assert view._ax.get_ylim() == pytest.approx((30, float(bar.vmax.text())), rel=1e-5)
+    kept = view._ax.get_ylim()
+    window.state.set_indices({"lat": 0})  # a typed range stays
+    assert view._ax.get_ylim() == kept and tuple(view._ax.get_xlim()) == (-10, 10)
+
+    bar.auto.setChecked(True)  # fits the slice again
+    lo, hi = view._ax.get_ylim()
+    assert lo <= y_range()[0] and hi >= y_range()[1] and hi - lo < 0.3
+
+    view._ax.set_ylim(20, 50)  # zooming moves the boxes too
+    assert (bar.vmin.text(), bar.vmax.text()) == ("20", "50")
 
 
 def test_map_loads_detail_when_zoomed(window, samples, monkeypatch):
@@ -621,3 +671,16 @@ def test_web_map_outlines_for_the_none_basemap():
         assert collection is not None, name
         assert collection["type"] == "FeatureCollection" and len(collection["features"]) > 100, name
         assert collection["features"][0]["geometry"]["type"] in ("LineString", "MultiLineString"), name
+
+
+def test_web_map_links_open_in_the_browser(qapp, monkeypatch):
+    """A clicked link (e.g. a basemap's attribution) goes to the browser, not over the map."""
+    opened = []
+    monkeypatch.setattr(web_map_view.QDesktopServices, "openUrl", opened.append)
+    page = web_map_view._Page()
+    url = QUrl("https://eox.at")
+    link = web_map_view.QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+    typed = web_map_view.QWebEnginePage.NavigationType.NavigationTypeTyped
+    assert not page.acceptNavigationRequest(url, link, True)
+    assert opened == [url]
+    assert page.acceptNavigationRequest(QUrl("file:///map.html"), typed, True)  # the map itself

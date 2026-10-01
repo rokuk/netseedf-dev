@@ -80,6 +80,8 @@ def test_normalize_lon():
     np.testing.assert_array_equal(lon, [190, 170])
     assert lon_0_360
     np.testing.assert_array_equal(normalize_lon(np.array([-170.0, 170]), False)[0], [-170, 170])
+    # Around a pole, 0..360 being a hair shorter mustn't put the seam at Greenwich
+    assert not normalize_lon(np.array([0.3, 90, 179.99, 180.01, 270, 359.7]))[1]
 
 
 def test_downsampled_grid(ds):

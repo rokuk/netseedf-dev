@@ -17,6 +17,7 @@ LON_UNITS = {"degreeseast", "degreeeast", "degreese", "degreee", "dege"}
 
 # Beyond this Web Mercator (and so Leaflet) can't show anything.
 MERCATOR_MAX_LAT = 85.0511
+WRAPS_AROUND = 350.0  # degrees of longitude: data spanning more goes all the way round (a pole)
 
 # Projection coordinates (CF 4.4) in these units, as metres.
 LENGTH_UNITS = {"m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
@@ -534,12 +535,15 @@ def normalize_lon(lon: np.ndarray, lon_0_360=None) -> tuple[np.ndarray, bool]:
 
     Without `lon_0_360`, picks whichever keeps the data contiguous: a Pacific
     box stored as 150..210 stays that way instead of being split across the
-    map; global grids become -180..180.
+    map; global grids become -180..180. So do grids around a pole: either way
+    they span almost 360°, and which one is a hair shorter is chance, but the
+    seam (where cells straddling it are left out) belongs at the antimeridian,
+    not at Greenwich.
     """
     west = (lon + 180) % 360 - 180
     east = lon % 360
     if lon_0_360 is None:
-        lon_0_360 = bool(_span(east) < _span(west))
+        lon_0_360 = bool(_span(east) < min(_span(west), WRAPS_AROUND))
     return (east if lon_0_360 else west), lon_0_360
 
 

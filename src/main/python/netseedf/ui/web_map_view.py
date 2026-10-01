@@ -6,6 +6,7 @@ import traceback
 
 import numpy as np
 from PySide6.QtCore import QFile, QIODevice, QObject, Qt, QTimer, QUrl, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -94,6 +95,14 @@ class _Page(QWebEnginePage):
     def javaScriptConsoleMessage(self, level, message, line, source):  # noqa: N802
         print(f"[web map] {source}:{line}: {message}", file=sys.stderr)
 
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # noqa: N802 (Qt override)
+        # Links (the basemaps' attributions) open in the browser: followed here, they
+        # would replace the map, and Python's calls into it would fail.
+        if nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
+            QDesktopServices.openUrl(url)
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
 
 class WebMapView(DataView):
     title = "Interactive map"
@@ -172,6 +181,9 @@ class WebMapView(DataView):
                              "can't show. Use the Map tab instead.")
         vmin, vmax = self._limits
         payload["fit"] = self._fit
+        # The page waits for the detail (always sent by _update_detail then) before
+        # swapping in the new data, so the overview doesn't flash up on its own.
+        payload["awaitDetail"] = self._view_box is not None and self.isVisible()
         payload["legend"] = {"title": variable_label(da), "colors": legend_colors(self._cmap),
                              "min": format_value(vmin, 4), "max": format_value(vmax, 4)}
         self._fit = False
@@ -286,6 +298,9 @@ class WebMapView(DataView):
                 self._load_detail()
         except Exception:  # the overview is still there; don't lose it over the detail
             traceback.print_exc()
+            self._detail = self._detail_locator = None
+            self._tracker.reset()
+            self._call("setDetail", None)
         self._update_grid_lines()
 
     def _load_detail(self):
@@ -301,8 +316,7 @@ class WebMapView(DataView):
             detail = geo_grid(da, geo, self.state.indices, self._max_size, window, like=self._grid)
             payload = self._payload(detail)
         if payload is None:
-            if self._detail is not None:
-                self._call("setDetail", None)
+            self._call("setDetail", None)  # also after new data: the page waits for it
             self._detail = self._detail_locator = None
             self._tracker.reset()
         else:
@@ -365,6 +379,7 @@ class WebMapView(DataView):
             return
         profile = _profile(self, self._user_agent)
         self.web = QWebEngineView()
+        self.web.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)  # no Back/Reload/View source
         page = _Page(profile, self.web)
         page.settings().setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)

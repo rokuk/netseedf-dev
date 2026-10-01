@@ -83,7 +83,9 @@ def _numeric_variables(nc):
     for group, node in walk(nc, "/"):
         for name, var in node.variables.items():
             if var.dtype is not str and var.dtype.kind in "fiu" \
-                    and " since " not in str(getattr(var, "units", "")):  # times are compared elsewhere
+                    and " since " not in str(getattr(var, "units", "")) \
+                    and "grid_mapping_name" not in var.ncattrs():  # times are compared elsewhere; a grid
+                # mapping is a container whose value is meaningless, often an unwritten default fill
                 yield group, name, var
 
 

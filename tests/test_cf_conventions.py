@@ -67,14 +67,14 @@ def dates(values):
 def test_netcdf4_integer_and_string_types(cf_file):
     def build(nc):
         nc.createDimension("n", 3)
-        var(nc, "u16", "u2", ("n",), [0, 40000, 65535])
+        var(nc, "u16", "u2", ("n",), [0, 40000, 65534])  # 65535 is the default fill value
         var(nc, "i64", "i8", ("n",), [-(2**40), 0, 2**40])
         var(nc, "u64", "u8", ("n",), [0, 1, 2**40])
         names = nc.createVariable("name", str, ("n",))
         names[:] = np.array(["a", "bb", "ccc"], dtype=object)
 
     f = cf_file(build)
-    np.testing.assert_array_equal(as_float(f.variable("/", "u16").values), [0, 40000, 65535])
+    np.testing.assert_array_equal(as_float(f.variable("/", "u16").values), [0, 40000, 65534])
     np.testing.assert_array_equal(as_float(f.variable("/", "i64").values), [-(2**40), 0, 2**40])
     np.testing.assert_array_equal(as_float(f.variable("/", "u64").values), [0, 1, 2**40])
     assert list(f.variable("/", "name").values) == ["a", "bb", "ccc"]
@@ -169,13 +169,24 @@ def test_default_fill_value_is_missing(cf_file):
         w.scale_factor = np.float32(0.5)
         w[:2] = [2, 4]
         nc.createVariable("count", "i4", ("n",))[:2] = [1, 2]
+        nc.createVariable("short", "i2", ("n",))[:2] = [1, 2]
+        nc.createVariable("big", "i8", ("n",))[:2] = [1, 2]
+        nc.createVariable("flags", "i4", ("n",)).flag_values = np.int32([0, 1])
+        nc.createVariable("crs", "i4").grid_mapping_name = "latitude_longitude"
 
     f = cf_file(build)
     values = f.variable("/", "v").values
     assert values[0] == 1 and np.isnan(values[2:]).all()
     np.testing.assert_array_equal(f.variable("/", "packed").values, [1, 2, np.nan, np.nan])
-    # Integers aren't turned into floats just in case some values were never written.
-    assert f.variable("/", "count").dtype == np.int32
+    # Integers become floats so that unwritten values can be NaN, as wide as needed.
+    count, short = f.variable("/", "count"), f.variable("/", "short")
+    assert count.dtype == np.float64 and short.dtype == np.float32
+    np.testing.assert_array_equal(count.values, [1, 2, np.nan, np.nan])
+    np.testing.assert_array_equal(short.values, [1, 2, np.nan, np.nan])
+    # Except where a float would lose more than it gains.
+    assert f.variable("/", "big").dtype == np.int64
+    assert f.variable("/", "flags").dtype == np.int32
+    assert f.variable("/", "crs").dtype == np.int32
 
 
 def test_missing_auxiliary_coordinates(cf_file):

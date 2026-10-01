@@ -18,17 +18,17 @@ class Style:
     def limits(self, values: np.ndarray) -> tuple[float, float]:
         if self.auto:
             return data_limits(values)
-        return _widen(self.vmin, self.vmax)
+        return widen(self.vmin, self.vmax)
 
 
 def data_limits(values) -> tuple[float, float]:
     finite = values[np.isfinite(values)] if values.size else values
     if finite.size == 0:
         return 0.0, 1.0
-    return _widen(float(finite.min()), float(finite.max()))
+    return widen(float(finite.min()), float(finite.max()))
 
 
-def _widen(lo, hi):
+def widen(lo, hi):
     if lo > hi:
         lo, hi = hi, lo
     if lo == hi:

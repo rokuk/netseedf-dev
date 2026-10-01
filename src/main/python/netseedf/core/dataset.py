@@ -67,6 +67,7 @@ def open_file(path) -> OpenedFile:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 groups, closers = _open_groups(path, **kwargs)
+                groups, closers = _without_unit_scale(path, groups, closers, **kwargs)
                 groups = {group: _distinct_dims(ds) for group, ds in groups.items()}
                 groups, messages = _apply_cf(groups, **kwargs)
         except (ValueError, TypeError, OverflowError) as e:
@@ -92,6 +93,37 @@ def _apply_cf(groups, decode_cf=True, **_):
         messages.append(f"Time values could not be decoded and are shown as raw numbers ({names}).")
     groups = {group: cf.mask_invalid(ds) for group, ds in groups.items()}
     return cf.attach_group_coordinates(groups), messages
+
+
+def _without_unit_scale(path, groups, closers, decode_cf=True, **kwargs):
+    """Variables with an integer scale_factor of 1 and no add_offset, decoded as if it weren't there.
+
+    xarray unpacks to the type of scale_factor, so e.g. int32 values with an int16
+    scale_factor become int16: they may overflow, and missing values can't be NaN
+    (reading them fails). Without the scale_factor they become floats, as usual.
+    """
+    if not decode_cf:
+        return groups, closers
+    affected = {group: [name for name, var in ds.variables.items() if _unit_int_scale(var.encoding)]
+                for group, ds in groups.items()}
+    if not any(affected.values()):
+        return groups, closers
+    raw, raw_closers = _open_groups(path, decode_cf=False)
+    for group, names in affected.items():
+        ds = groups[group]
+        for name in names:
+            var = raw[group].variables[name].copy(deep=False)  # still lazy
+            var.attrs = {k: v for k, v in var.attrs.items() if k != "scale_factor"}
+            decoded = xr.conventions.decode_cf_variable(name, var, **kwargs)
+            ds = ds.assign_coords({name: decoded}) if name in ds.coords else ds.assign({name: decoded})
+        groups[group] = ds
+    return groups, closers + raw_closers
+
+
+def _unit_int_scale(encoding) -> bool:
+    scale = encoding.get("scale_factor")
+    return scale is not None and "add_offset" not in encoding \
+        and np.issubdtype(np.asarray(scale).dtype, np.integer) and scale == 1
 
 
 def _distinct_dims(ds: xr.Dataset) -> xr.Dataset:

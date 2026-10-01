@@ -104,3 +104,20 @@ def test_repeated_dimension_gets_its_own_name(tmp_path):
     assert list(kernel.level_2.values) == [1000, 850, 500]
     assert float(kernel.isel(level=1, level_2=2)) == 5
     f.close()
+
+
+def test_integer_unit_scale_factor_is_ignored(tmp_path):
+    import netCDF4
+
+    path = tmp_path / "int_scale.nc"
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.createDimension("x", 3)
+        var = nc.createVariable("precip", "i4", ("x",), fill_value=-999)
+        var.set_auto_maskandscale(False)
+        var[:] = [70000, -999, 5]  # 70000 doesn't fit in the int16 of scale_factor
+        var.scale_factor = np.int16(1)
+    f = open_file(path)
+    precip = f.variable("/", "precip")
+    assert precip.dtype.kind == "f"
+    np.testing.assert_array_equal(precip.values, [70000, np.nan, 5])
+    f.close()

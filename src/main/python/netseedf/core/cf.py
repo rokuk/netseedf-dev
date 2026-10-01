@@ -44,10 +44,13 @@ def _invalid_mask(var: xr.Variable):
     disk = np.dtype(enc.get("dtype", var.dtype))
     lo, hi = _valid_limits(attrs)
     # Unwritten values hold the default fill value, unless the variable says otherwise.
-    # Bytes don't have one (NUG), and integers can't be masked without making them floats.
+    # Bytes don't have one (NUG). Integers become floats to hold NaN, except where that
+    # would lose more than it gains: flags are categories, int64 doesn't fit in a float,
+    # and a grid mapping's value means nothing.
     fill = None
-    if ("_FillValue" not in enc and "_FillValue" not in attrs and var.dtype.kind == "f"
-            and disk.kind in "fiu" and disk.itemsize > 1 and "_Unsigned" not in enc):
+    if ("_FillValue" not in enc and "_FillValue" not in attrs
+            and disk.kind in "fiu" and disk.itemsize > 1 and "_Unsigned" not in enc
+            and (var.dtype.kind == "f" or _integer_data(var))):
         fill = netCDF4.default_fillvals.get(disk.str[1:])
     if lo is None and hi is None and fill is None:
         return None
@@ -80,6 +83,12 @@ def _invalid_mask(var: xr.Variable):
         return out
 
     return func, dtype
+
+
+def _integer_data(var: xr.Variable) -> bool:
+    """An integer variable holding measurements, whose unwritten values should be NaN."""
+    return (var.dtype.kind in "iu" and var.dtype.itemsize < 8
+            and not {"flag_values", "flag_masks", "grid_mapping_name"} & var.attrs.keys())
 
 
 def _valid_limits(attrs):
