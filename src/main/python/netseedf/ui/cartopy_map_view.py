@@ -27,7 +27,7 @@ from netseedf.core.detail import DetailTracker, padded, resolution_note
 from netseedf.core.formatting import position_text, selection_text, value_text, variable_label
 from netseedf.core.gridlines import cell_corners
 from netseedf.core.render import cell_edges, corners_of
-from netseedf.core.slicing import is_finer
+from netseedf.core.slicing import is_finer, slow_layout
 from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.mpl_canvas import MplWidget
 from netseedf.ui.style_bar import StyleBar
@@ -146,6 +146,7 @@ class CartopyMapView(DataView):
         self._ax = self._detail = self._detail_artist = self._detail_locator = None
         self._layout = None  # what the map on screen was made for, see _layout_key
         self._native = None  # the grid's own projection, if it has one (cartopy)
+        self._slow = None  # why the variable is slow to read, if the file makes it so
 
     def unavailable_reason(self):
         da = self.state.da
@@ -162,6 +163,9 @@ class CartopyMapView(DataView):
     def variable_changed(self):
         self.style_bar.reset_range()
         self.mpl.reset()
+        # The new variable may take a while to read; nothing should use the old map meanwhile.
+        self._detail_timer.stop()
+        self._ax = None
 
     def _redraw(self):
         if self.state.da is not None and self.isVisible():
@@ -171,21 +175,32 @@ class CartopyMapView(DataView):
         """What the map depends on apart from the values shown (GeoInfo compares by identity)."""
         return self.state.ref, self.state.geo, self.projection.currentText(), self.style_bar.style().cmap
 
-    def refresh(self):
+    def _sizes(self):
+        """Whether cells are drawn as a mesh, and how many are read along each dim at most."""
+        geo = self.state.geo
+        mesh = geo.kind == "curvilinear" or self.projection.currentText() != "Plate Carrée" \
+            or cells_from_bounds(geo)
+        if geo.kind == "points":
+            return mesh, MAX_POINTS
+        return mesh, MAX_SIZE_MESH if mesh else MAX_SIZE_IMAGE
+
+    def loader(self):
+        da, geo, indices = self.state.da, self.state.geo, dict(self.state.indices)
+        _, max_size = self._sizes()
+        return lambda: geo_grid(da, geo, indices, max_size)
+
+    def refresh(self, grid):
         self._detail_timer.stop()
-        if self._update_values():
+        if self._update_values(grid):
             return
         self._tracker.reset()
         self._ax = self._detail = self._detail_artist = self._detail_locator = None
         self._layout = self._layout_key()
         da, geo = self.state.da, self.state.geo
         name = self.projection.currentText()
-        self._mesh = geo.kind == "curvilinear" or name != "Plate Carrée" or cells_from_bounds(geo)
-        if geo.kind == "points":
-            self._max_size = MAX_POINTS
-        else:
-            self._max_size = MAX_SIZE_MESH if self._mesh else MAX_SIZE_IMAGE
-        self._grid = grid = geo_grid(da, geo, self.state.indices, self._max_size)
+        self._mesh, self._max_size = self._sizes()
+        self._slow = slow_layout(da, geo.dims)
+        self._grid = grid
         self._locator = GridLocator(grid)
         self._limits = self.style_bar.limits_for(grid.values)
 
@@ -238,8 +253,8 @@ class CartopyMapView(DataView):
         where = selection_text(self.state.da, grid.slice.fixed)
         return f"{self.state.da.name}" + (f"   {where}" if where else "")
 
-    def _update_values(self) -> bool:
-        """Show new values (another time step, colour range) in the map that's there.
+    def _update_values(self, grid) -> bool:
+        """Show new values `grid` (another time step, colour range) in the map that's there.
 
         Much faster than drawing the map again. Only possible when nothing but
         the values changed: same variable, projection and colormap, and the
@@ -247,8 +262,6 @@ class CartopyMapView(DataView):
         """
         if self._ax is None or self._layout != self._layout_key():
             return False
-        da, geo = self.state.da, self.state.geo
-        grid = geo_grid(da, geo, self.state.indices, self._max_size)
         old = self._grid
         if grid.kind != old.kind or not (_same(grid.lat, old.lat) and _same(grid.lon, old.lon)):
             return False
@@ -317,7 +330,9 @@ class CartopyMapView(DataView):
 
     def _update_note(self):
         detail = self._detail.slice if self._detail is not None else None
-        self.note.setText(resolution_note(self._grid.slice, detail))
+        slow = self._slow
+        self.note.setText(resolution_note(self._grid.slice, detail) + (f"  {slow.note}" if slow else ""))
+        self.note.setToolTip(slow.explanation(self.state.da.sizes) if slow else "")
 
     def _update_detail(self):
         if self._ax is None or self.state.da is None or not self.isVisible():

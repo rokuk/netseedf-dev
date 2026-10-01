@@ -1,5 +1,6 @@
 """Opening NetCDF files and describing what is in them."""
 
+import threading
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,11 @@ import xarray as xr
 from netseedf.core import cf
 
 ENGINE = "netcdf4"
+
+# netCDF-C and HDF5 aren't thread-safe. xarray serializes reading values, but not opening
+# files and reading their headers; whatever does those holds this, and so does every read
+# in the background (see DataView), so neither happens while the other does.
+FILE_LOCK = threading.RLock()
 
 FILE_FILTER = "NetCDF files (*.nc *.nc4 *.cdf *.netcdf *.h5 *.hdf5 *.he5);;All files (*)"
 
@@ -41,6 +47,8 @@ class OpenedFile:
     groups: dict[str, xr.Dataset]  # group path ("/", "/a", "/a/b") -> dataset
     warnings: list[str] = field(default_factory=list)
     _closers: list = field(default_factory=list, repr=False)
+    # Read when opening: the GUI mustn't wait for the file while it's read in the background.
+    headers: dict[str, "GroupHeader"] = field(default_factory=dict, repr=False)
 
     @property
     def name(self):
@@ -52,15 +60,36 @@ class OpenedFile:
     def variable(self, group, name) -> xr.DataArray:
         return self.groups[group][name]
 
+    def group_header(self, group="/") -> "GroupHeader":
+        """See group_header()."""
+        if group not in self.headers:
+            self.headers[group] = group_header(self.path, group)
+        return self.headers[group]
+
+    def variable_header(self, group, name) -> "VariableHeader | None":
+        """See variable_header()."""
+        while True:
+            for var in self.group_header(group).variables:
+                if var.name == name:
+                    return var
+            if group == "/":
+                return None
+            group = group.rsplit("/", 1)[0] or "/"  # e.g. an inherited coordinate
+
     def close(self):
-        for closer in self._closers:
-            closer.close()
-        self._closers.clear()
+        with FILE_LOCK:  # not while a background read uses the file (it would open it again)
+            for closer in self._closers:
+                closer.close()
+            self._closers.clear()
 
 
 def open_file(path) -> OpenedFile:
     """Open a NetCDF file lazily, including all of its groups."""
-    path = Path(path)
+    with FILE_LOCK:
+        return _open_file(Path(path))
+
+
+def _open_file(path):
     first_error = None
     for kwargs in _DECODE_ATTEMPTS:
         try:
@@ -75,7 +104,7 @@ def open_file(path) -> OpenedFile:
         lines = (str(w.message).splitlines()[0] for w in caught
                  if issubclass(w.category, (xr.SerializationWarning, RuntimeWarning)))
         messages += _unique(line for line in lines if not any(q in line for q in _QUIET))
-        return OpenedFile(path, groups, messages, closers)
+        return OpenedFile(path, groups, messages, closers, file_headers(path))
     raise first_error
 
 
@@ -216,13 +245,27 @@ class GroupHeader:
 
 def group_header(path, group="/") -> GroupHeader:
     """Dimensions, variables and attributes of the file (or one group), as ``ncdump -h`` lists them."""
-    with netCDF4.Dataset(path) as nc:
-        node = _node(nc, group)
-        return GroupHeader(
-            dimensions=[DimensionHeader(d.name, len(d), d.isunlimited()) for d in node.dimensions.values()],
-            variables=[_variable_header(v) for v in node.variables.values()],
-            attrs=_attrs(node),
-        )
+    with FILE_LOCK, netCDF4.Dataset(path) as nc:
+        return _group_header(_node(nc, group))
+
+
+def file_headers(path) -> dict[str, GroupHeader]:
+    """group_header() of every group in the file, by group path."""
+    with FILE_LOCK, netCDF4.Dataset(path) as nc:
+        headers, todo = {}, [nc]
+        while todo:
+            node = todo.pop()
+            headers[node.path] = _group_header(node)
+            todo += node.groups.values()
+        return headers
+
+
+def _group_header(node):
+    return GroupHeader(
+        dimensions=[DimensionHeader(d.name, len(d), d.isunlimited()) for d in node.dimensions.values()],
+        variables=[_variable_header(v) for v in node.variables.values()],
+        attrs=_attrs(node),
+    )
 
 
 def variable_header(path, group, name) -> VariableHeader | None:
@@ -230,7 +273,7 @@ def variable_header(path, group, name) -> VariableHeader | None:
 
     None if the file has no such variable (one netseedf made up).
     """
-    with netCDF4.Dataset(path) as nc:
+    with FILE_LOCK, netCDF4.Dataset(path) as nc:
         node = _node(nc, group)
         for n in (node, *_parents(node)):  # e.g. an inherited coordinate
             if name in n.variables:

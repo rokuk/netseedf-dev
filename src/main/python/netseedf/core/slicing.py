@@ -70,6 +70,73 @@ def extract(da: xr.DataArray, free_dims, indices, max_size=None, window=None) ->
     return Slice(load_selection(sub, selection), free_dims, tuple(steps), fixed, tuple(selection))
 
 
+@dataclass
+class SlowLayout:
+    """How a variable is stored such that every slice of it takes long to read.
+
+    Its chunks are compressed and span many steps of the dims a view holds
+    fixed (e.g. time), so HDF5 decompresses whole chunks to get one step.
+    Thinning the slice doesn't help: every chunk holds some of what's shown.
+    """
+
+    name: str
+    chunks: dict[str, int]  # chunk size along every dim of the variable
+    free_dims: tuple[str, ...]
+    read: int  # bytes decompressed per slice
+    wanted: int  # bytes the slice holds
+
+    @property
+    def spans(self) -> dict[str, int]:
+        """Chunk size along the dims held fixed, where more than one step."""
+        return {d: c for d, c in self.chunks.items() if d not in self.free_dims and c > 1}
+
+    @property
+    def note(self) -> str:
+        steps = " × ".join(f"{c} {d}" for d, c in self.spans.items())
+        return f"⚠ slow file layout: chunks span {steps} steps"
+
+    def explanation(self, sizes: dict[str, int]) -> str:
+        """Why, and what to do about it; `sizes` are the variable's dim sizes."""
+        stored = " × ".join(f"{c} {d}" for d, c in self.chunks.items())
+        spec = ",".join(f"{d}/{sizes[d] if d in self.free_dims else 1}" for d in self.chunks)
+        return (f"The file stores '{self.name}' compressed in chunks of {stored}, so showing one "
+                f"step decompresses {_megabytes(self.read)} for {_megabytes(self.wanted)} of values. "
+                f"Rewriting the file with chunks of a single step makes this fast, e.g.:\n"
+                f"nccopy -c {spec} in.nc out.nc")
+
+
+# A view says why it's slow when each slice decompresses at least this much, and that many
+# times what the slice holds.
+SLOW_READ_BYTES = 100_000_000
+SLOW_READ_FACTOR = 10
+_COMPRESSION = ("zlib", "szip", "zstd", "bzip2", "blosc")
+
+
+def slow_layout(da: xr.DataArray, free_dims) -> SlowLayout | None:
+    """Whether the file's chunking makes every slice over `free_dims` slow to read (see SlowLayout)."""
+    enc = da.encoding
+    chunks = enc.get("chunksizes")
+    # (Uncompressed chunks are read in part, only what's needed.)
+    if not chunks or len(chunks) != da.ndim or not any(enc.get(c) for c in _COMPRESSION):
+        return None
+    itemsize = np.dtype(enc.get("dtype", da.dtype)).itemsize  # as stored, e.g. packed in shorts
+    read = wanted = itemsize
+    for d, n, c in zip(da.dims, da.shape, chunks, strict=True):
+        c = min(c, n)
+        if d in free_dims:
+            read *= math.ceil(n / c) * c
+            wanted *= n
+        else:
+            read *= c
+    if read < SLOW_READ_BYTES or read < SLOW_READ_FACTOR * wanted:
+        return None
+    return SlowLayout(str(da.name), dict(zip(da.dims, chunks, strict=True)), tuple(free_dims), read, wanted)
+
+
+def _megabytes(n):
+    return f"{n / 1e6:,.0f} MB" if n >= 1e6 else f"{n / 1e3:,.0f} kB"
+
+
 def _selection(n, window, max_size):
     if isinstance(window, np.ndarray):
         step = max(1, math.ceil(len(window) / max_size)) if max_size else 1

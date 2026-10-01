@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from netseedf.core.dataset import describe, group_header, variable_header
+from netseedf.core.dataset import describe
 from netseedf.core.formatting import format_value
 from netseedf.core.slicing import variable_stats
 from netseedf.ui.base_view import wait_cursor
@@ -65,7 +65,7 @@ class InfoView(QWidget):
         self._show(None, text, attrs=None)
 
     def show_file(self, opened, group="/"):
-        header = group_header(opened.path, group)
+        header = opened.group_header(group)
         self._show(opened, "" if group == "/" else f"Group <b>{group}</b>",
                    header.attrs, "Global attributes" if group == "/" else "Group attributes",
                    opened.warnings if group == "/" else ())
@@ -76,7 +76,7 @@ class InfoView(QWidget):
             for v in header.variables])
 
     def show_variable(self, opened, group, da):
-        header = variable_header(opened.path, group, str(da.name))
+        header = opened.variable_header(group, str(da.name))
         if header is None:  # not in the file as such; made up when opening it
             subheading = f"Variable <b>{da.name}</b> {describe(da).dims_text}, {da.dtype}"
             attrs = da.attrs
