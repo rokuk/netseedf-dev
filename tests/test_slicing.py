@@ -9,6 +9,7 @@ from netseedf.core.slicing import (
     is_time_dim,
     point_series,
     series_frame,
+    slow_layout,
     time_dims,
 )
 
@@ -103,3 +104,28 @@ def test_load_selection_reads_distant_indices_as_blocks(salinity, monkeypatch):
     values = slicing.load_selection(sub, (slice(0, 30, 1), cols))
     np.testing.assert_array_equal(values, sub.values[:, cols])
     assert max(read) <= 30 * 3  # two blocks of 3 columns, not all 40
+
+
+def _chunked(chunks, **encoding):
+    values = np.broadcast_to(np.float32(0), (20000, 250, 550))  # 11 GB, if it weren't all one value
+    da = xr.DataArray(values, dims=("time", "lat", "lon"), name="pcp")
+    da.encoding = {"chunksizes": chunks, "zlib": True, "dtype": np.dtype("f4"), **encoding}
+    return da
+
+
+def test_slow_layout_when_chunks_span_many_time_steps():
+    slow = slow_layout(_chunked((1000, 10, 50)), ("lat", "lon"))
+    assert slow.read == 4 * 1000 * 250 * 550 and slow.wanted == 4 * 250 * 550
+    assert slow.spans == {"time": 1000}
+    assert slow.note == "⚠ slow file layout: chunks span 1000 time steps"
+    explanation = slow.explanation({"time": 20000, "lat": 250, "lon": 550})
+    assert "550 MB for 550 kB" in explanation
+    assert "nccopy -c time/1,lat/250,lon/550 " in explanation
+
+
+def test_no_slow_layout_for_maps_of_one_time_step_or_uncompressed_chunks():
+    assert slow_layout(_chunked((1, 250, 550)), ("lat", "lon")) is None
+    assert slow_layout(_chunked((10, 250, 550)), ("lat", "lon")) is None  # only 55 MB
+    assert slow_layout(_chunked((1000, 10, 50), zlib=False), ("lat", "lon")) is None
+    assert slow_layout(_chunked((1000, 10, 50)), ("time",)) is None  # a time series: 4 MB
+    assert slow_layout(xr.DataArray(np.zeros((3, 4)), dims=("lat", "lon")), ("lat", "lon")) is None

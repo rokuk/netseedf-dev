@@ -49,7 +49,14 @@ from netseedf.core.render import (
     point_colors,
     render_overlay,
 )
-from netseedf.core.slicing import fixed_indices, is_finer, point_series, series_frame, time_dims
+from netseedf.core.slicing import (
+    fixed_indices,
+    is_finer,
+    point_series,
+    series_frame,
+    slow_layout,
+    time_dims,
+)
 from netseedf.ui.base_view import DataView, buddy_label, wait_cursor
 from netseedf.ui.cartopy_map_view import NO_GEO_MESSAGE, OUTLINE_SCALE
 from netseedf.ui.style_bar import StyleBar
@@ -133,6 +140,7 @@ class WebMapView(DataView):
         self._picked = None  # the cell last clicked on, see pick()
         self._view_box = None  # visible (west, east, south, north), from the page
         self._grid_note = ""  # why grid lines aren't shown, if they aren't
+        self._slow = None  # why the variable is slow to read, if the file makes it so
         self._fit = True
         self._tracker = DetailTracker()
         self._detail_timer = QTimer(self, singleShot=True, interval=DETAIL_DELAY_MS)
@@ -164,15 +172,20 @@ class WebMapView(DataView):
         if self.state.da is not None and self.isVisible():
             self.update_view()
 
-    def refresh(self):
+    def loader(self):
+        self._ensure_web()  # QtWebEngine starts up meanwhile
+        da, geo, indices = self.state.da, self.state.geo, dict(self.state.indices)
+        max_size = _max_size(geo)
+        return lambda: geo_grid(da, geo, indices, max_size)
+
+    def refresh(self, grid):
         self._ensure_web()
         self._detail_timer.stop()
         self._tracker.reset()
         self._detail = self._detail_locator = None
         da, geo = self.state.da, self.state.geo
-        self._max_size = {"points": MAX_POINTS, "curvilinear": MAX_SIZE_CURVILINEAR}.get(
-            geo.kind, MAX_SIZE_REGULAR)
-        grid = geo_grid(da, geo, self.state.indices, self._max_size)
+        self._max_size = _max_size(geo)
+        self._slow = slow_layout(da, geo.dims)
         self._limits = self.style_bar.limits_for(grid.values)
         self._cmap = self.style_bar.style().cmap
         payload = self._payload(with_cyclic_column(grid))
@@ -222,7 +235,9 @@ class WebMapView(DataView):
     def _update_note(self):
         if self._grid is not None:
             detail = self._detail.slice if self._detail is not None else None
-            self.note.setText(resolution_note(self._grid.slice, detail) + self._grid_note)
+            slow = f"  {self._slow.note}" if self._slow else ""
+            self.note.setText(resolution_note(self._grid.slice, detail) + self._grid_note + slow)
+            self.note.setToolTip(self._slow.explanation(self.state.da.sizes) if self._slow else "")
 
     def hover_text(self, lat, lon):
         if self._locator is None:
@@ -391,6 +406,11 @@ class WebMapView(DataView):
         self.web.setPage(page)
         self.web.setUrl(QUrl.fromLocalFile(self._resources("web", "map.html")))
         self._layout.addWidget(self.web, 1)
+
+
+def _max_size(geo):
+    """How many cells (or stations) are read along each dim at most."""
+    return {"points": MAX_POINTS, "curvilinear": MAX_SIZE_CURVILINEAR}.get(geo.kind, MAX_SIZE_REGULAR)
 
 
 class _TileInterceptor(QWebEngineUrlRequestInterceptor):

@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
+import xarray as xr  # noqa: E402
 from PySide6 import QtWebEngineWidgets  # noqa: E402, F401 (must precede the QApplication)
 from PySide6.QtCore import QSettings, QUrl  # noqa: E402
 from PySide6.QtGui import QKeySequence  # noqa: E402
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import QAbstractButton, QFileDialog, QLabel  # noqa: E402
 
 from netseedf.context import SourceContext  # noqa: E402
 from netseedf.core.coords import geo_grid  # noqa: E402
-from netseedf.ui import web_map_view  # noqa: E402
+from netseedf.ui import base_view, web_map_view  # noqa: E402
 from netseedf.ui.cartopy_map_view import configure_offline_data  # noqa: E402
 from netseedf.ui.main_window import MainWindow, user_agent  # noqa: E402
 from netseedf.ui.table_view import to_frame  # noqa: E402
@@ -32,7 +33,8 @@ def resource(*rel):
 
 
 @pytest.fixture
-def window(qtbot, tmp_path):
+def window(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(base_view, "READ_IN_BACKGROUND", False)  # views are drawn right away
     configure_offline_data(RESOURCES / "cartopy", tmp_path / "cartopy")
     w = MainWindow(resource, SETTINGS, QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(w)
@@ -684,3 +686,66 @@ def test_web_map_links_open_in_the_browser(qapp, monkeypatch):
     assert not page.acceptNavigationRequest(url, link, True)
     assert opened == [url]
     assert page.acceptNavigationRequest(QUrl("file:///map.html"), typed, True)  # the map itself
+
+
+def test_maps_read_in_the_background(window, samples, monkeypatch, qtbot):
+    """Of several quick requests only the latest is read next, and drawn."""
+    from netseedf.ui import cartopy_map_view
+    monkeypatch.setattr(base_view, "READ_IN_BACKGROUND", True)
+    read = []
+    original = cartopy_map_view.geo_grid
+    monkeypatch.setattr(cartopy_map_view, "geo_grid",
+                        lambda da, geo, indices, *a, **k: (read.append(indices["time"]),
+                                                           original(da, geo, indices, *a, **k))[1])
+    window.open_path(samples["regular_global.nc"])
+    view = window.map
+    window.tabs.setCurrentWidget(view)  # reads time step 0
+    for t in (1, 2, 3):
+        window.state.set_indices({"time": t})
+    qtbot.waitUntil(lambda: not view._reading)
+    assert read == [0, 3]
+    assert "2024-01-04" in view._title.get_text()
+    assert view.busy.isHidden() and _errors(window) == {}
+
+
+def test_reading_another_variable_shows_a_message(window, samples, monkeypatch, qtbot):
+    import threading
+
+    from netseedf.ui import cartopy_map_view
+    monkeypatch.setattr(base_view, "READ_IN_BACKGROUND", True)
+    window.open_path(samples["regular_global.nc"])
+    window.tabs.setCurrentWidget(window.map)
+    view = window.map
+    qtbot.waitUntil(lambda: view._drawn is not None)
+    view._busy_timer.setInterval(0)
+    go_on = threading.Event()
+    original = cartopy_map_view.geo_grid
+    monkeypatch.setattr(cartopy_map_view, "geo_grid",
+                        lambda *a, **k: (go_on.wait(10), original(*a, **k))[1])
+    window.open_path(samples["four_d.nc"])  # the map of sst mustn't stay while salinity is read
+    # ...nor the GUI wait for that read (e.g. for the file's header, for the Info tab)
+    qtbot.waitUntil(lambda: view._stack.currentWidget() is view._message
+                    and view._message.text() == "Reading 'salinity'…" and not view.busy.isHidden())
+    go_on.set()
+    qtbot.waitUntil(lambda: view._drawn == window.state.ref)
+    assert view._stack.currentWidget() is view.body and view.busy.isHidden()
+    assert view._title.get_text().startswith("salinity")
+
+
+def test_maps_say_when_the_file_makes_reading_slow(window, tmp_path, monkeypatch):
+    from netseedf.core import slicing
+    monkeypatch.setattr(slicing, "SLOW_READ_BYTES", 0)
+    path = tmp_path / "time_chunks.nc"
+    ds = xr.Dataset({"pcp": (("time", "lat", "lon"), np.ones((20, 6, 8), "f4"))},
+                    coords={"lat": ("lat", np.arange(6.0), {"units": "degrees_north"}),
+                            "lon": ("lon", np.arange(8.0), {"units": "degrees_east"})})
+    ds.to_netcdf(path, encoding={"pcp": {"zlib": True, "chunksizes": (20, 3, 4)}})
+    window.open_path(path)
+    window.tabs.setCurrentWidget(window.map)
+    web = window.web_map  # (its page needs a GPU; this is what its refresh() sets up)
+    web._grid = geo_grid(window.state.da, window.state.geo, window.state.indices)
+    web._slow = slicing.slow_layout(window.state.da, window.state.geo.dims)
+    web._update_note()
+    for view in (window.map, web):
+        assert "slow file layout: chunks span 20 time steps" in view.note.text(), view.title
+        assert "nccopy -c time/1,lat/6,lon/8 " in view.note.toolTip(), view.title
