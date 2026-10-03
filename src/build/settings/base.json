@@ -2,7 +2,7 @@
     "app_name": "NetSeeDF",
     "author": "Rok Kuk",
     "main_module": "src/main/python/main.py",
-    "version": "2.1.7",
+    "version": "2.1.8",
     "homepage": "https://github.com/rokuk/netseedf-dev",
     "contact": "kontakt@rokuk.org",
     "public_settings": ["homepage", "contact"],
