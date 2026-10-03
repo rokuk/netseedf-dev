@@ -17,6 +17,16 @@ station data (lat/lon along one dimension) can all be mapped. NetSeeDF complies 
 
 NetSeeDF is developed by [Rok Kuk](https://rokuk.org) and licensed under the [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html).
 
+## Screenshots
+
+![Animation](https://storage.rokuk.org/netseedf/foto/rec1.gif)
+
+![Animation 2](https://storage.rokuk.org/netseedf/foto/rec2.gif)
+
+![Data display](https://storage.rokuk.org/netseedf/foto/pic2.png)
+
+![Map](https://storage.rokuk.org/netseedf/foto/pic1.png)
+
 ## Development
 
 Needs [uv](https://docs.astral.sh/uv/) and Python 3.13.
@@ -31,10 +41,6 @@ uv run pytest -m perf                     # performance budgets (writes a large 
 uv run ruff check src tests scripts
 uv run pyright                            # type checking
 ```
-
-At start-up the app reads `https://storage.rokuk.org/netseedf/latest/version.json`
-(`{"version": "2.2.0"}`) and, if that is newer than `version` in `src/build/settings/base.json`,
-offers to download it from https://rokuk.org/projects/netseedf.
 
 The app runs from source without fbs: `netseedf/context.py` uses fbs Pro's
 `ApplicationContext` when it's installed and a small stand-in otherwise.
