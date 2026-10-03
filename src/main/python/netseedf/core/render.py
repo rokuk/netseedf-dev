@@ -9,6 +9,12 @@ quadrilateral per cell, with the same corners as the grid lines. Others
 become an image stretched linearly between its bounds in Web Mercator, so
 their image rows are laid out in Mercator y, not in latitude. Otherwise the
 overlay would drift away from the basemap towards the poles.
+
+Curvilinear grids made in a map projection (e.g. polar ones) are always such
+an image, but made the other way round: each pixel is projected into the
+grid's own x and y to find its cell. That is exact where interpolating
+latitudes and longitudes can't be: around a pole their longitudes go all the
+way round, so cells (and their corners) there have no sensible longitude.
 """
 
 import base64
@@ -17,12 +23,19 @@ from dataclasses import dataclass
 
 import matplotlib
 import numpy as np
+import pyproj
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import Normalize, to_hex
 from matplotlib.figure import Figure
 from PIL import Image
 
-from netseedf.core.coords import MERCATOR_MAX_LAT, GeoGrid, cell_edges, fill_missing_positions
+from netseedf.core.coords import (
+    MERCATOR_MAX_LAT,
+    GeoGrid,
+    cell_edges,
+    fill_missing_positions,
+    normalize_lon,
+)
 from netseedf.core.gridlines import cell_corners, grid_corners
 
 PIXELS_PER_CELL = 3
@@ -31,6 +44,7 @@ MAX_POLYGON_CELLS = 20_000  # more and drawing every cell as a polygon gets slow
 # Zoomed in, a few pixels per cell makes that visible (and it shifts whenever the
 # detail is reloaded), so small images are scaled up to about screen resolution.
 MIN_PX = 2048
+PROJECT_EVERY = 4  # pixels: projected exactly on a lattice this coarse, interpolated in between
 
 
 def _image_size(width, height, max_px):
@@ -78,6 +92,8 @@ def render_overlay(grid: GeoGrid, cmap, vmin, vmax, max_px=4096) -> Overlay | No
     """Colour-mapped transparent PNG of a regular or curvilinear grid."""
     if grid.kind == "regular":
         return _render_regular(grid, cmap, vmin, vmax, max_px)
+    if grid.kind == "curvilinear" and grid.xy_edges is not None and grid.crs is not None:
+        return _render_projected(grid, cmap, vmin, vmax, max_px)
     if grid.kind == "curvilinear":
         return _render_curvilinear(grid, cmap, vmin, vmax, max_px)
     raise ValueError(f"Can't render a {grid.kind} grid as an image")
@@ -119,9 +135,11 @@ def cell_polygons(grid: GeoGrid, cmap, vmin, vmax, max_cells=MAX_POLYGON_CELLS) 
     """Every cell of a full-resolution curvilinear grid, if there aren't too many.
 
     The corners are the ones the grid lines are drawn with, so the two match.
-    None when an image has to do instead.
+    None when an image has to do instead, always for grids in a map projection:
+    their image is exact (see _render_projected), and their quadrilaterals in
+    latitude and longitude wouldn't be, e.g. around a pole.
     """
-    if grid.kind != "curvilinear" or grid.slice.downsampled:
+    if grid.kind != "curvilinear" or grid.slice.downsampled or grid.xy_edges is not None:
         return None
     if grid.values.size > max_cells or min(grid.values.shape) < 2:
         return None
@@ -172,6 +190,116 @@ def _render_curvilinear(grid, cmap, vmin, vmax, max_px):
     fig.savefig(buf, format="png", dpi=100, transparent=True)
     return Overlay(buf.getvalue(), float(inverse_mercator_y(y0)), float(x0),
                    float(inverse_mercator_y(y1)), float(x1))
+
+
+def _render_projected(grid, cmap, vmin, vmax, max_px):
+    """A grid in a map projection, resampled onto Web Mercator pixels."""
+    extent = projected_extent(grid)
+    if extent is None:
+        return None
+    south, west, north, east = extent
+    y0, y1 = mercator_y(south), mercator_y(north)
+    ny, nx = grid.values.shape
+    longest = int(np.clip(max(ny, nx) * PIXELS_PER_CELL, 256, max_px))
+    aspect = (y1 - y0) / np.deg2rad(east - west)  # height / width
+    width, height = (longest, longest * aspect) if aspect <= 1 else (longest / aspect, longest)
+    width, height = _image_size(width, height, max_px)
+
+    lon = west + (np.arange(width) + 0.5) * (east - west) / width
+    lat = inverse_mercator_y(y1 - (np.arange(height) + 0.5) * (y1 - y0) / height)
+    to_xy = pyproj.Transformer.from_crs("EPSG:4326", grid.crs, always_xy=True)
+    x, y = _project_lattice(to_xy, lat, lon)
+    x_edges, y_edges = grid.xy_edges
+    col, row = _cell_index(x_edges, x), _cell_index(y_edges, y)
+    inside = (col >= 0) & (row >= 0)
+    colors = _cmap(cmap)(Normalize(vmin, vmax)(np.ma.masked_invalid(grid.values)), bytes=True)
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    rgba[inside] = colors[row[inside], col[inside]]
+    buf = io.BytesIO()
+    Image.fromarray(rgba, "RGBA").save(buf, format="png")
+    return Overlay(buf.getvalue(), float(south), float(west), float(north), float(east))
+
+
+def projected_extent(grid: GeoGrid, samples=256):
+    """(south, west, north, east) a projected grid covers, within Web Mercator's latitudes.
+
+    From its outline: inside it, latitudes and longitudes only go further at a
+    pole. A grid around one covers all longitudes, in its convention (see
+    lon_0_360). None if it's all closer to a pole than Web Mercator goes.
+    """
+    (x0, x1), (y0, y1) = ((float(e[0]), float(e[-1])) for e in grid.xy_edges)
+    t = np.linspace(0, 1, samples, endpoint=False)
+    x = np.concatenate([x0 + (x1 - x0) * t, np.full(samples, x1), x1 - (x1 - x0) * t, np.full(samples, x0)])
+    y = np.concatenate([np.full(samples, y0), y0 + (y1 - y0) * t, np.full(samples, y1), y1 - (y1 - y0) * t])
+    lon, lat = (np.asarray(a) for a in
+                pyproj.Transformer.from_crs(grid.crs, "EPSG:4326", always_xy=True).transform(x, y))
+    ok = np.isfinite(lon) & np.isfinite(lat)
+    if not ok.any():
+        return None
+    lon, lat = lon[ok], lat[ok]
+    south, north = float(np.min(lat)), float(np.max(lat))
+    to_xy = pyproj.Transformer.from_crs("EPSG:4326", grid.crs, always_xy=True)
+    for pole in (90.0, -90.0):
+        px, py = to_xy.transform(0.0, pole)
+        if np.isfinite(px) and np.isfinite(py) \
+                and min(x0, x1) <= px <= max(x0, x1) and min(y0, y1) <= py <= max(y0, y1):
+            south, north = (south, pole) if pole > 0 else (pole, north)
+            west = 0.0 if grid.lon_0_360 else -180.0
+            return _mercator_extent(south, west, north, west + 360)
+    # Going round the outline, longitudes without jumps of 360°.
+    lon = np.rad2deg(np.unwrap(np.deg2rad(lon)))
+    west, east = float(np.min(lon)), float(np.max(lon))
+    middle = (west + east) / 2
+    shift = float(normalize_lon(np.array([middle]), grid.lon_0_360)[0][0]) - middle
+    return _mercator_extent(south, west + shift, north, east + shift)
+
+
+def _mercator_extent(south, west, north, east):
+    south, north = max(south, -MERCATOR_MAX_LAT), min(north, MERCATOR_MAX_LAT)
+    return (south, west, north, east) if south < north and west < east else None
+
+
+def _project_lattice(transformer, lat, lon):
+    """Projected (x, y) of every pixel at (lat, lon), each (lat.size, lon.size).
+
+    Projected exactly every PROJECT_EVERY pixels, bilinearly in between: map
+    projections are smooth, so that's as good, and many times faster.
+    """
+    rows, cols = _lattice(lat.size), _lattice(lon.size)
+    lo, la = np.meshgrid(lon[cols], lat[rows])
+    x, y = transformer.transform(lo, la)
+    return tuple(_interpolate(np.asarray(a, dtype=float), rows, cols, lat.size, lon.size)
+                 for a in (x, y))
+
+
+def _lattice(n):
+    return np.unique(np.append(np.arange(0, n, PROJECT_EVERY), n - 1))
+
+
+def _interpolate(a, rows, cols, height, width):
+    """Values on the lattice `a` (rows x cols) at every pixel (height x width)."""
+    (i, s), (j, t) = _lerp(rows, height), _lerp(cols, width)
+    a = a[:, j] * (1 - t) + a[:, j + 1] * t if cols.size > 1 else a[:, j]
+    return a[i] * (1 - s)[:, None] + a[i + 1] * s[:, None] if rows.size > 1 else a[i]
+
+
+def _lerp(points, n):
+    """For each of 0..n-1: the lattice point before it, and how far it is towards the next."""
+    p = np.arange(n)
+    if points.size == 1:
+        return np.zeros(n, dtype=int), np.zeros(n)
+    i = np.clip(np.searchsorted(points, p, side="right") - 1, 0, points.size - 2)
+    return i, (p - points[i]) / (points[i + 1] - points[i])
+
+
+def _cell_index(edges, q):
+    """Index of the cell between monotonic `edges` holding each of `q`; -1 if none does."""
+    n = edges.size - 1
+    ascending = edges[-1] > edges[0]
+    with np.errstate(invalid="ignore"):
+        i = np.searchsorted(edges if ascending else edges[::-1], q, side="right") - 1
+        i = np.where(np.isfinite(q) & (i >= 0) & (i < n), i, -1)
+    return i if ascending else np.where(i >= 0, n - 1 - i, -1)
 
 
 def corners_of(cells):

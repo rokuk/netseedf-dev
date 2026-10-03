@@ -24,6 +24,7 @@ from netseedf.ui.info_view import InfoView
 from netseedf.ui.plot_view import PlotView
 from netseedf.ui.state import SelectionState
 from netseedf.ui.table_view import TableView
+from netseedf.ui.update_checker import UpdateChecker
 from netseedf.ui.variable_tree import ROLE, VariableTree
 from netseedf.ui.web_map_view import WebMapView
 
@@ -88,6 +89,7 @@ class MainWindow(QMainWindow):
         self.state.indicesChanged.connect(self._indices_changed)
         self.tabs.currentChanged.connect(self._tab_changed)
 
+        self.updates = UpdateChecker(self, self._settings, build_settings, user_agent(build_settings))
         self._build_menus()
         self.setAcceptDrops(True)
         self._update_title()
@@ -117,6 +119,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._action("Go to &Dimensions", self.dims.focus_first,
                                          QKeySequence("Ctrl+D")))
         help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(self._action("Check for &Updates…", lambda: self.check_for_updates(manual=True)))
         help_menu.addAction(self._action("&About", self._about))
 
     def _action(self, text, slot, shortcut=None):
@@ -288,6 +291,10 @@ class MainWindow(QMainWindow):
 
     def _show_hover(self, text):
         self.hover.setText(text)
+
+    def check_for_updates(self, manual=False):
+        """Look for a newer version in the background (see UpdateChecker)."""
+        self.updates.check(manual)
 
     # --- drag and drop, closing -------------------------------------------------
 

@@ -38,7 +38,7 @@ LEAFLET_FILES = [
 
 
 def fetch_natural_earth():
-    target = RESOURCES / "cartopy"
+    target = RESOURCES / "cartopy_data"
     with tempfile.TemporaryDirectory() as tmp:
         cartopy.config["data_dir"] = tmp
         cartopy.config["pre_existing_data_dir"] = tmp

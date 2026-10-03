@@ -1,8 +1,10 @@
 import io
 
+import matplotlib
 import numpy as np
 import pytest
 import xarray as xr
+from matplotlib.colors import Normalize
 from PIL import Image
 
 from netseedf.core.coords import GeoGrid, find_geo, geo_grid, normalize_lon, with_cyclic_column
@@ -163,3 +165,37 @@ def test_sample_grids_render(samples, name):
     overlay = render_overlay(grid, "viridis", *np.nanpercentile(grid.values, [0, 100]))
     assert overlay.west < overlay.east and overlay.south < overlay.north
     assert overlay.data_url.startswith("data:image/png;base64,")
+
+
+def test_projected_grid_is_resampled_exactly(samples):
+    import pyproj
+
+    with xr.open_dataset(samples["polar_projected.nc"]) as ds:
+        var = ds["ice"]
+        geo = find_geo(var, ds)
+        grid = geo_grid(var, geo, {"time": 0})
+    vmin, vmax = np.nanmin(grid.values), np.nanmax(grid.values)
+    assert cell_polygons(grid, "viridis", vmin, vmax) is None  # not quadrilaterals in lat/lon
+    overlay = render_overlay(grid, "viridis", vmin, vmax)
+    # Around the pole: all longitudes, up to as far north as Web Mercator goes.
+    assert (overlay.west, overlay.east, overlay.north) == (-180, 180, 85.0511)
+    assert 0 < overlay.south < 10
+    px = _pixels(overlay)
+    height, width = px.shape[:2]
+    y0, y1 = mercator_y(overlay.south), mercator_y(overlay.north)
+    to_xy = pyproj.Transformer.from_crs("EPSG:4326", geo.projection.crs, always_xy=True)
+    colors = matplotlib.colormaps["viridis"](Normalize(vmin, vmax)(grid.values), bytes=True)
+    x_edges, y_edges = grid.xy_edges
+    for lat, lon in [(84, 179), (84, -179), (80, 0), (70, 100), (45, -120), (60, -45)]:
+        col = int((lon - overlay.west) / (overlay.east - overlay.west) * width)
+        row = int((y1 - mercator_y(lat)) / (y1 - y0) * height)
+        # The cell holding the pixel's centre, in the grid's own x and y.
+        x, y = to_xy.transform(overlay.west + (col + 0.5) * (overlay.east - overlay.west) / width,
+                               inverse_mercator_y(y1 - (row + 0.5) * (y1 - y0) / height))
+        i = int(np.searchsorted(x_edges, x)) - 1
+        j = int(np.searchsorted(-y_edges, -y)) - 1  # y descends
+        if np.isnan(grid.values[j, i]):
+            assert px[row, col, 3] == 0
+        else:
+            assert tuple(px[row, col]) == tuple(colors[j, i])
+    assert px[-5, :, 3].any() and not px[-5, :, 3].all()  # only the grid's corners reach that far south

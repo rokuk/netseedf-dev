@@ -51,7 +51,8 @@ class DataView(QWidget):
 
     A view whose data may take long to read also implements ``loader()``: the
     reading then happens in the background, and ``refresh(loaded)`` draws what
-    was read. Until then the view shows what it showed before.
+    was read. Until then the view shows what it showed before if that was the
+    same variable (e.g. another time step), or else nothing.
     """
 
     title = ""
@@ -136,6 +137,10 @@ class DataView(QWidget):
             if job is None:
                 self._run_refresh(self.refresh)
             elif READ_IN_BACKGROUND:
+                if self._drawn != self.state.ref:
+                    # Don't leave another variable (e.g. of the previous file) on show meanwhile.
+                    # Blank for now; quick reads would only flash a "Reading…" message.
+                    self.show_message("")
                 self._queued = (self._generation, job)  # replaces any read not started yet
                 if not self._reading:
                     self._start_read()

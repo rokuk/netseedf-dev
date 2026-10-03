@@ -1,6 +1,6 @@
 [project]
 name = "netseedf-dev"
-version = "0.1.0"
+version = "2.1.5"
 description = "Quick and simple viewer for NetCDF files: variables, tables, plots and maps."
 requires-python = ">=3.13"
 license = "GPL-3.0-or-later"
@@ -13,13 +13,14 @@ dependencies = [
     "netcdf4>=1.7.4",
     "numpy>=2.5.3",
     "pandas>=3.0.6",
-    "pylint>=4.0.9",
     "pyside6>=6.11.2",
     "xarray>=2026.7.0",
 ]
 
 [dependency-groups]
 dev = [
+    "pylint>=4.1.2",
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-qt>=4.5.0",
     "ruff>=0.16.9",
@@ -29,6 +30,9 @@ dev = [
 pythonpath = ["src/main/python", "."]
 testpaths = ["tests"]
 qt_api = "pyside6"
+# The performance tests are slow; run them with `pytest -m perf`.
+addopts = ["-m", "not perf"]
+markers = ["perf: timing budgets for reading and rendering large files"]
 filterwarnings = [
     # Raised inside netCDF4 when the sample files are written
     "ignore:Setting the shape on a NumPy array:DeprecationWarning",
@@ -42,6 +46,12 @@ src = ["src/main/python", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pyright]
+include = ["src/main/python", "tests", "scripts"]
+extraPaths = ["src/main/python", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
 
 [tool.pylint.main]
 # Compiled extensions pylint can't introspect statically; let it import them.

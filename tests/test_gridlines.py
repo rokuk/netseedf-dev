@@ -84,3 +84,18 @@ def test_cell_corners():
     assert corners.shape == (4, 5)
     cy, cx = np.meshgrid(np.arange(-0.5, 3), np.arange(-0.5, 4), indexing="ij")
     np.testing.assert_allclose(corners, 10 * cy + cx)
+
+
+def test_projected_lines_are_exact_and_cut_at_the_antimeridian(lines_for):
+    lines = lines_for("polar_projected.nc", "ice", (0, -180, 90, 180))
+    points = np.concatenate([np.array(line) for line in lines])
+    assert np.abs(points[:, 1]).max() <= 180
+    for line in lines:  # nothing drawn across the map
+        assert np.abs(np.diff(np.array(line)[:, 1])).max(initial=0) <= 90
+    # A corner of the grid (x, y = -6000 km, 6000 km), where the projection puts it.
+    import pyproj
+    crs = pyproj.CRS.from_cf({"grid_mapping_name": "lambert_azimuthal_equal_area",
+                              "longitude_of_projection_origin": 0.0, "latitude_of_projection_origin": 90.0,
+                              "semi_major_axis": 6378137.0, "inverse_flattening": 298.257223563})
+    lon, lat = pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform(-6e6, 6e6)
+    assert np.min(np.hypot(points[:, 0] - lat, points[:, 1] - lon)) < 1e-6

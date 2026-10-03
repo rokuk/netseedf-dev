@@ -27,8 +27,14 @@ uv run python scripts/fetch_resources.py  # download Natural Earth and Leaflet
 uv run python tests/sample_data.py        # write sample files to samples/
 uv run python src/main/python/main.py samples/regular_global.nc
 uv run pytest
+uv run pytest -m perf                     # performance budgets (writes a large sample file)
 uv run ruff check src tests scripts
+uv run pyright                            # type checking
 ```
+
+At start-up the app reads `https://storage.rokuk.org/netseedf/latest/version.json`
+(`{"version": "2.2.0"}`) and, if that is newer than `version` in `src/build/settings/base.json`,
+offers to download it from https://rokuk.org/projects/netseedf.
 
 The app runs from source without fbs: `netseedf/context.py` uses fbs Pro's
 `ApplicationContext` when it's installed and a small stand-in otherwise.

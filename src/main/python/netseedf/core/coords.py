@@ -223,6 +223,19 @@ class GeoGrid:
     # Curvilinear grids in a map projection (GeoInfo.projection): (x, y) edges of the
     # drawn columns and rows in its coordinates, real cell edges like lat_edges/lon_edges.
     xy_edges: tuple[np.ndarray, np.ndarray] | None = None
+    crs: pyproj.CRS | None = None  # of xy_edges
+
+    def corner_lonlat(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """(lat, lon) of the drawn cells' corners (ny + 1, nx + 1), exactly, from xy_edges.
+
+        Longitudes are in the grid's convention (see lon_0_360), so they jump by
+        360 degrees where the grid crosses the antimeridian (or goes round a pole).
+        """
+        if self.xy_edges is None or self.crs is None:
+            return None
+        x, y = np.meshgrid(*self.xy_edges)
+        lon, lat = pyproj.Transformer.from_crs(self.crs, "EPSG:4326", always_xy=True).transform(x, y)
+        return np.asarray(lat), normalize_lon(np.asarray(lon), self.lon_0_360)[0]
 
     @property
     def bounds(self):
@@ -270,7 +283,8 @@ def geo_grid(da: xr.DataArray, geo: GeoInfo, indices, max_size=None, window=None
         corners = vertex_corners(lat, unwrapped, _bounds_slice(geo.lat_bounds, sl), lon_b)
     xy_edges = geo.projection.edges(index) if geo.projection is not None else None
     return GeoGrid(geo.kind, lat, lon, values, sl, index, lon_0_360,
-                   corners=corners, from_bounds=corners is not None, xy_edges=xy_edges)
+                   corners=corners, from_bounds=corners is not None, xy_edges=xy_edges,
+                   crs=geo.projection.crs if geo.projection is not None else None)
 
 
 def regular_edges(geo: GeoInfo, lon_0_360):

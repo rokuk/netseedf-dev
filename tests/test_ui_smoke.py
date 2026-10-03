@@ -35,7 +35,7 @@ def resource(*rel):
 @pytest.fixture
 def window(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(base_view, "READ_IN_BACKGROUND", False)  # views are drawn right away
-    configure_offline_data(RESOURCES / "cartopy", tmp_path / "cartopy")
+    configure_offline_data(RESOURCES / "cartopy_data", tmp_path / "cartopy")
     w = MainWindow(resource, SETTINGS, QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(w)
     w.resize(1200, 800)
@@ -749,3 +749,12 @@ def test_maps_say_when_the_file_makes_reading_slow(window, tmp_path, monkeypatch
     for view in (window.map, web):
         assert "slow file layout: chunks span 20 time steps" in view.note.text(), view.title
         assert "nccopy -c time/1,lat/6,lon/8 " in view.note.toolTip(), view.title
+
+
+def test_help_menu_checks_for_updates(window, monkeypatch):
+    checks = []
+    monkeypatch.setattr(window.updates, "check", lambda manual=False: checks.append(manual))
+    help_menu = window.menuBar().actions()[-1].menu()
+    action = next(a for a in help_menu.actions() if a.text().replace("&", "") == "Check for Updates…")
+    action.trigger()
+    assert checks == [True]

@@ -112,10 +112,11 @@ class AppContext(ApplicationContext or SourceContext):
 
         cache = Path(QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppDataLocation)) / "cartopy"
-        configure_offline_data(self.get_resource("cartopy"), cache)
+        configure_offline_data(self.get_resource("cartopy_data"), cache)
         window = self.main_window
         self.app.fileOpenRequested.connect(window.open_path)
         window.show()
+        window.check_for_updates()
         for arg in sys.argv[1:]:
             if Path(arg).is_file():
                 window.open_path(arg)

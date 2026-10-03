@@ -54,10 +54,19 @@ def _curvilinear_lines(da, geo, grid, indices, box, max_lines):
     fine = geo_grid(da, geo, indices, None, window, like=grid)
     if min(fine.lat.shape) < 2:
         return []
-    lat, lon = grid_corners(fine)
+    exact = fine.corner_lonlat()
+    lat, lon = exact if exact is not None else grid_corners(fine)
     rows = [np.column_stack([lat[i], lon[i]]) for i in range(lat.shape[0])]
     cols = [np.column_stack([lat[:, j], lon[:, j]]) for j in range(lat.shape[1])]
+    if exact is not None:  # cut where they cross the antimeridian (or a pole), not drawn across the map
+        rows, cols = ([part for line in lines for part in _split_at_jumps(line)] for lines in (rows, cols))
     return [part for line in rows + cols for part in _finite_runs(line)]
+
+
+def _split_at_jumps(points: np.ndarray, jump=90.0) -> list[np.ndarray]:
+    """The line cut where its longitude jumps: wrapped round, or past a pole."""
+    cuts = np.flatnonzero(np.abs(np.diff(points[:, 1])) > jump) + 1
+    return np.split(points, cuts)
 
 
 def grid_corners(grid: GeoGrid) -> tuple[np.ndarray, np.ndarray]:

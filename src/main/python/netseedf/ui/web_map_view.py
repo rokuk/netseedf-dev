@@ -487,7 +487,7 @@ def _shapes_geojson(resources, category, file):
         import cartopy.io.shapereader as shpreader
         from shapely.geometry import mapping
 
-        path = resources("cartopy", "shapefiles", "natural_earth", category, file)
+        path = resources("cartopy_data", "shapefiles", "natural_earth", category, file)
         features = [{"type": "Feature", "properties": {}, "geometry": mapping(g)}
                     for g in shpreader.Reader(path).geometries()]
         return {"type": "FeatureCollection", "features": features}
