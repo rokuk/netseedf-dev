@@ -485,7 +485,7 @@ wheels = [
 
 [[package]]
 name = "netseedf-dev"
-version = "2.1.5"
+version = "2.1.6"
 source = { virtual = "." }
 dependencies = [
     { name = "cartopy" },
