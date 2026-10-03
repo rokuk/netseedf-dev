@@ -1,6 +1,6 @@
 [project]
 name = "netseedf-dev"
-version = "2.1.5"
+version = "2.1.6"
 description = "Quick and simple viewer for NetCDF files: variables, tables, plots and maps."
 requires-python = ">=3.13"
 license = "GPL-3.0-or-later"
