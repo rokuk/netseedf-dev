@@ -1,31 +1,55 @@
 # NetSeeDF
 
-Quick and simple viewer for NetCDF files. Available for Windows and macOS.
+A simple application for viewing and visualizing data in NetCDF files.
 
-Inspired by Panoply, NetSeeDF is designed to be simpler tool that does not require a Java installation. Designed with students and researchers in mind, it lets you quickly explore available variables, their shapes, and visualize grid point values on a map.
+![NetSeeDF stepping through time on a map](https://storage.rokuk.org/netseedf/foto/rec1.gif)
+
+## Download
+
+| Platform | Installer |
+| --- | --- |
+| Windows | [NetSeeDFSetup.exe](https://storage.rokuk.org/netseedf/latest/windows/NetSeeDFSetup.exe) |
+| macOS (Apple Silicon) | [netseedf-macos-arm64.dmg](https://storage.rokuk.org/netseedf/latest/macos-arm64/netseedf-macos-arm64.dmg) |
+| macOS (Intel) | [netseedf-macos-intel.dmg](https://storage.rokuk.org/netseedf/latest/macos-intel/netseedf-macos-intel.dmg) |
+| Linux (.deb) | [netseedf-linux.deb](https://storage.rokuk.org/netseedf/latest/linux-deb/netseedf-linux.deb) |
+
+The links always point to the latest version. More on the [project page](https://rokuk.org/projects/netseedf/).
+
+## About
+
+Inspired by Panoply, NetSeeDF is a simpler alternative that does not require Java.
+Designed with students and researchers in mind, it lets you quickly explore the variables in a file,
+their shapes, and visualize grid point values on a map. You can also export the time series of
+a chosen grid cell.
+
+## Features
 
 - **Tree** of the file's groups, variables and coordinates, with attributes.
-- **Table**: any 2D slice, copy (Ctrl+C) or export to CSV.
+- **Table** of any 2D slice, with copy (Ctrl+C) and export to CSV.
 - **Plot**: line plot or heatmap of any slice, with zoom, pan and PNG export.
-- **Map**: Cartopy map with coastlines and borders and a choice of projections. Works offline.
-- **Interactive map**: Leaflet map on OpenStreetMap / satellite / topo tiles (needs internet), with the value under the mouse.
+- **Map** with coastlines, borders and a choice of projections. Works offline.
+- **Interactive map** on OpenStreetMap, satellite or topographic tiles (needs internet), showing
+  the value under the mouse and exporting the time series of a grid cell.
+- **Sliders** to step through the remaining dimensions (time, depth, …).
 
-Sliders below the tabs step through the remaining dimensions (time, depth, …).
-
-Regular lat/lon grids, curvilinear grids with 2D lat/lon and
-station data (lat/lon along one dimension) can all be mapped. NetSeeDF complies with the [CF conventions](https://cfconventions.org/cf-conventions/cf-conventions.html).
-
-NetSeeDF is developed by [Rok Kuk](https://rokuk.org) and licensed under the [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html).
+Regular lat/lon grids, curvilinear grids with 2D lat/lon and station data (lat/lon along one
+dimension) can all be mapped. NetSeeDF follows the [CF conventions](https://cfconventions.org/cf-conventions/cf-conventions.html).
 
 ## Screenshots
 
-![Animation](https://storage.rokuk.org/netseedf/foto/rec1.gif)
+![Stepping through a dimension](https://storage.rokuk.org/netseedf/foto/rec2.gif)
 
-![Animation 2](https://storage.rokuk.org/netseedf/foto/rec2.gif)
+![Table view](https://storage.rokuk.org/netseedf/foto/pic2.png)
 
-![Data display](https://storage.rokuk.org/netseedf/foto/pic2.png)
+![Map view](https://storage.rokuk.org/netseedf/foto/pic1.png)
 
-![Map](https://storage.rokuk.org/netseedf/foto/pic1.png)
+## Feedback
+
+Found a bug or have a suggestion? [Open an issue](https://github.com/rokuk/netseedf-dev/issues)
+or write to [kontakt@rokuk.org](mailto:kontakt@rokuk.org).
+
+NetSeeDF is developed by [Rok Kuk](https://rokuk.org) and licensed under the
+[GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.en.html).
 
 ## Development
 
@@ -45,22 +69,21 @@ uv run pyright                            # type checking
 The app runs from source without fbs: `netseedf/context.py` uses fbs Pro's
 `ApplicationContext` when it's installed and a small stand-in otherwise.
 
-## Building installers with fbs Pro
+### Building installers with fbs Pro
 
-Build the Windows installer on Windows and the macOS one on a Mac. 
-On macOS, the build is for the Mac's own architecture (Apple Silicon or Intel).
+Build each installer on its own platform. On macOS, the build is for the Mac's own
+architecture (Apple Silicon or Intel).
 
-1. Install fbs Pro into the venv with from the fbs file, e.g.
-   `uv pip install <file>`.
+1. Install fbs Pro into the venv from the fbs file, e.g. `uv pip install <file>`.
 2. `uv run fbs run` starts the app the way fbs will package it.
-3. `uv run fbs freeze` builds `target/netseedf/` (Windows) or `target/netseedf.app` (macOS).
+3. `uv run fbs freeze` builds `target/netseedf/` (Windows, Linux) or `target/netseedf.app` (macOS).
    Start it and open a file before building the installer.
 4. `uv run fbs installer` builds `target/netseedfSetup.exe` (needs [NSIS](https://nsis.sourceforge.io)
-   on `PATH`) or `target/netseedf.dmg`.
+   on `PATH`), `target/netseedf.dmg` or `target/netseedf.deb`.
 
 Build settings are in `src/build/settings/*.json`. If a frozen build fails to start, `fbs freeze --debug`.
 
-## Layout
+### Layout
 
 ```
 src/main/python/main.py            entry point (fbs main_module)
@@ -78,8 +101,9 @@ scripts/fetch_resources.py         re-download Natural Earth data and Leaflet
 Coastlines and borders from [Natural Earth](https://www.naturalearthdata.com) (public domain).
 Interactive map by [Leaflet](https://leafletjs.com) (BSD-2-Clause); basemaps © OpenStreetMap
 contributors and OpenTopoMap; [Sentinel-2 cloudless](https://s2maps.eu) by EOX IT Services GmbH
-(contains modified Copernicus Sentinel data 2016, CC BY 4.0). Licensed under the GNU GPL v3 (see `LICENSE`).
+(contains modified Copernicus Sentinel data 2016, CC BY 4.0).
 
 ## License
 
-Code in this repository is licensed under the [GNU General Public License v3](https://www.gnu.org/licenses/gpl-3.0.en.html). See `LICENSE` for details.
+Code in this repository is licensed under the [GNU General Public License v3](https://www.gnu.org/licenses/gpl-3.0.en.html).
+See [`LICENSE`](LICENSE) for details.
